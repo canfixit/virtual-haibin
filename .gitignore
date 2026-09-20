@@ -85,9 +85,6 @@ dist
 
 # Gatsby files
 .cache/
-# Comment in the public line in if your project uses Gatsby and not Next.js
-# https://nextjs.org/blog/next-9-1#public-directory-support
-# public
 
 # vuepress build output
 .vuepress/dist
@@ -141,3 +138,27 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Credentials, certificates, and private material
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Solana wallets / local keypairs
+wallet.json
+*-keypair.json
+**/id.json
+
+# Solana / Anchor generated state
+.anchor/
+test-ledger/
+ledger/
