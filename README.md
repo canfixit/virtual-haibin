@@ -79,6 +79,73 @@ packages/
 
 The repository will be built incrementally. This structure describes the intended architecture and may evolve as the MVP is validated.
 
+## Current development vertical slice
+
+The initial scaffold already connects the major runtime boundaries without depending on Solana yet:
+
+```text
+React UI
+  -> Virtual Haibin agent API
+  -> mandate/policy evaluation
+  -> mock external service agent
+  -> simulated payment
+  -> audit record
+```
+
+Two development cases are exposed in the UI:
+
+- an allowed 0.01 USDC-equivalent request
+- a denied 0.10 request that exceeds the mandate's 0.02 per-transaction limit
+
+This is intentionally deterministic. Solana identity, signed mandates, and real payments will replace the mocked boundaries incrementally after the MVP direction is confirmed.
+
+## Getting started
+
+### Requirements
+
+- Node.js 24 LTS
+- pnpm 12.4.2
+
+### Install
+
+```bash
+git clone git@github.com:canfixit/virtual-haibin.git
+cd virtual-haibin
+pnpm install
+```
+
+Commit the generated `pnpm-lock.yaml` after the first local install.
+
+### Run the complete local vertical slice
+
+```bash
+pnpm dev
+```
+
+This starts:
+
+- web UI: `http://localhost:5173`
+- Virtual Haibin agent: `http://localhost:4000`
+- mock external service agent: `http://localhost:4001`
+
+Open `http://localhost:5173` and run either the allowed or denied request.
+
+Individual processes can also be started with:
+
+```bash
+pnpm dev:web
+pnpm dev:agent
+pnpm dev:service
+```
+
+### Validate before pushing
+
+```bash
+pnpm check
+```
+
+This runs TypeScript checks across the workspace and builds the web application.
+
 ## Design principles
 
 1. **Bounded autonomy** — agents should receive explicit, constrained authority rather than unlimited access.
