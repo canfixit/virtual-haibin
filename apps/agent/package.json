@@ -1,0 +1,20 @@
+{
+  "name": "@virtual-haibin/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@virtual-haibin/audit": "workspace:*",
+    "@virtual-haibin/mandate": "workspace:*",
+    "@virtual-haibin/payments": "workspace:*",
+    "@virtual-haibin/policy": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6"
+  }
+}
