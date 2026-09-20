@@ -1,0 +1,23 @@
+{
+  "name": "virtual-haibin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Verifiable authority for AI agents.",
+  "packageManager": "pnpm@12.4.2",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @virtual-haibin/web --filter @virtual-haibin/agent --filter @virtual-haibin/service-agent run dev",
+    "dev:web": "pnpm --filter @virtual-haibin/web dev",
+    "dev:agent": "pnpm --filter @virtual-haibin/agent dev",
+    "dev:service": "pnpm --filter @virtual-haibin/service-agent dev",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "build": "pnpm --filter @virtual-haibin/web build",
+    "check": "pnpm typecheck && pnpm build"
+  },
+  "devDependencies": {
+    "tsx": "4.23.13",
+    "typescript": "6.0.3"
+  }
+}
