@@ -61,8 +61,6 @@ A request outside the delegated authority should be denied rather than executed.
 
 ## Core architecture
 
-The project is being designed around reusable components:
-
 ```text
 apps/
   web/             # User-facing dashboard
@@ -77,11 +75,7 @@ packages/
   audit/           # Verifiable action records
 ```
 
-The repository will be built incrementally. This structure describes the intended architecture and may evolve as the MVP is validated.
-
 ## Current development vertical slice
-
-The initial scaffold already connects the major runtime boundaries without depending on Solana yet:
 
 ```text
 React UI
@@ -99,52 +93,73 @@ Two development cases are exposed in the UI:
 
 This is intentionally deterministic. Solana identity, signed mandates, and real payments will replace the mocked boundaries incrementally after the MVP direction is confirmed.
 
-## Getting started
+## Docker-first development
 
-### Requirements
+The default development workflow keeps WSL clean. **Node.js, pnpm, JavaScript dependencies, TypeScript tooling, Vite, and all application processes run inside Docker.**
 
-- Node.js 24 LTS
-- pnpm 12.4.2
+Host requirement:
 
-### Install
+- Docker / Docker Desktop with WSL integration
+
+You do **not** need to install Node.js, pnpm, npm packages, or Git into WSL.
+
+### Clone without host Git
+
+Because this repository is public, use a temporary Git container:
 
 ```bash
-git clone git@github.com:canfixit/virtual-haibin.git
+mkdir -p ~/Projects
+cd ~/Projects
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/work" \
+  -w /work \
+  alpine/git \
+  clone https://github.com/canfixit/virtual-haibin.git
+
 cd virtual-haibin
-pnpm install
 ```
 
-Commit the generated `pnpm-lock.yaml` after the first local install.
-
-### Run the complete local vertical slice
+### Start the complete development stack
 
 ```bash
-pnpm dev
+docker compose up --build
 ```
 
 This starts:
 
 - web UI: `http://localhost:5173`
 - Virtual Haibin agent: `http://localhost:4000`
-- mock external service agent: `http://localhost:4001`
+- mock service agent: `http://localhost:4001`
 
-Open `http://localhost:5173` and run either the allowed or denied request.
+Then open:
 
-Individual processes can also be started with:
-
-```bash
-pnpm dev:web
-pnpm dev:agent
-pnpm dev:service
+```text
+http://localhost:5173
 ```
 
-### Validate before pushing
+All `node_modules` directories are Docker-managed named volumes, so project dependencies are not written into the WSL project tree.
+
+### Stop
 
 ```bash
-pnpm check
+docker compose down
 ```
 
-This runs TypeScript checks across the workspace and builds the web application.
+To remove dependency volumes as well:
+
+```bash
+docker compose down -v
+```
+
+### Validate inside Docker
+
+```bash
+docker compose run --rm agent pnpm check
+```
+
+See [Docker-first development](docs/docker-development.md) for cloning, Git operations, dependency updates, logs, and isolation details.
 
 ## Design principles
 
@@ -156,8 +171,6 @@ This runs TypeScript checks across the workspace and builds the web application.
 6. **MVP first** — establish a working vertical slice before adding deeper protocol complexity.
 
 ## Roadmap
-
-Current high-level sequence:
 
 ```text
 working end-to-end skeleton
@@ -197,6 +210,7 @@ A longer-term research question is:
 
 - [Strategy and World's Fair roadmap](docs/strategy.md)
 - [Provisional MVP plan](docs/mvp-plan.md)
+- [Docker-first development](docs/docker-development.md)
 
 ## Security
 
