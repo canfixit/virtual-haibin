@@ -1,0 +1,24 @@
+FROM node:24.21.0-bookworm-slim
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+
+RUN npm install --global pnpm@12.4.2
+
+WORKDIR /workspace
+
+COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps/web/package.json apps/web/package.json
+COPY apps/agent/package.json apps/agent/package.json
+COPY apps/service-agent/package.json apps/service-agent/package.json
+COPY packages/identity/package.json packages/identity/package.json
+COPY packages/mandate/package.json packages/mandate/package.json
+COPY packages/policy/package.json packages/policy/package.json
+COPY packages/payments/package.json packages/payments/package.json
+COPY packages/audit/package.json packages/audit/package.json
+
+RUN pnpm install --no-frozen-lockfile
+
+COPY . .
+
+CMD ["pnpm", "dev"]
