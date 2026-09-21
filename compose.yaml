@@ -1,0 +1,90 @@
+name: virtual-haibin
+
+x-app-image: &app-image
+  build:
+    context: .
+    dockerfile: Dockerfile.dev
+  image: virtual-haibin-dev:local
+  working_dir: /workspace
+
+x-dev-volumes: &dev-volumes
+  - .:/workspace
+  - root_node_modules:/workspace/node_modules
+  - web_node_modules:/workspace/apps/web/node_modules
+  - agent_node_modules:/workspace/apps/agent/node_modules
+  - service_agent_node_modules:/workspace/apps/service-agent/node_modules
+  - identity_node_modules:/workspace/packages/identity/node_modules
+  - mandate_node_modules:/workspace/packages/mandate/node_modules
+  - policy_node_modules:/workspace/packages/policy/node_modules
+  - payments_node_modules:/workspace/packages/payments/node_modules
+  - audit_node_modules:/workspace/packages/audit/node_modules
+
+services:
+  service-agent:
+    <<: *app-image
+    command: ["pnpm", "dev:service"]
+    environment:
+      SERVICE_AGENT_PORT: "4001"
+    ports:
+      - "4001:4001"
+    volumes: *dev-volumes
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4001/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  agent:
+    <<: *app-image
+    command: ["pnpm", "dev:agent"]
+    environment:
+      AGENT_PORT: "4000"
+      SERVICE_AGENT_URL: "http://service-agent:4001"
+    ports:
+      - "4000:4000"
+    volumes: *dev-volumes
+    depends_on:
+      service-agent:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  web:
+    <<: *app-image
+    command: ["pnpm", "dev:web"]
+    environment:
+      VITE_AGENT_API_URL: "http://localhost:4000"
+    ports:
+      - "5173:5173"
+    volumes: *dev-volumes
+    depends_on:
+      agent:
+        condition: service_healthy
+
+volumes:
+  root_node_modules:
+  web_node_modules:
+  agent_node_modules:
+  service_agent_node_modules:
+  identity_node_modules:
+  mandate_node_modules:
+  policy_node_modules:
+  payments_node_modules:
+  audit_node_modules:
