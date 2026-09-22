@@ -1,219 +1,434 @@
 # Crypto World's Fair MVP Plan
 
-> **Status:** provisional until the Darren / mentor discussion.  
-> The use case may change; the reusable Virtual Haibin primitives should remain.
+> **Status:** revised 22 September 2026 after the Colosseum Copilot review.  
+> The hackathon wedge is now intentionally narrower than the long-term Virtual Haibin thesis.
 
-## Candidate MVP
+## Hackathon thesis
 
-### Delegated autonomous commerce
+For the Crypto World's Fair, Virtual Haibin is not trying to prove that delegated authority, spending limits, wallets, or audit logs are new concepts.
 
-Demonstrate that an AI agent can act and pay autonomously **without receiving unlimited authority**.
+The MVP focuses on one integration problem:
 
-A human gives Virtual Haibin a constrained, verifiable mandate. Virtual Haibin requests a service from another agent/tool, evaluates policy, makes an allowed machine-to-machine payment, receives the result, and produces an auditable record.
+> **Bind a human-approved paid service request to the exact Solana payment an AI agent is allowed to make, enforce that permission at the signing boundary, and produce evidence that can be independently verified.**
 
-## Candidate demo flow
+Primary demo-facing positioning:
+
+**Verifiable spending permissions for AI agents.**
+
+Longer-term thesis:
+
+**Verifiable authority for autonomous agents.**
+
+See [Hackathon Product Decision — 22 September 2026](hackathon-decision-2026-09-22.md).
+
+## Narrow MVP
+
+A human authorizes Virtual Haibin to purchase one specific class of service under explicit constraints.
+
+Example permission:
+
+```text
+Agent: Virtual Haibin
+Service: Research Agent
+Capability: research.summary
+Recipient: <configured Solana recipient>
+Mint: <configured devnet token mint>
+Maximum per call: 0.02
+Total budget: 0.05
+Expiry: 30 minutes
+```
+
+The autonomous agent does not hold an unrestricted signing key.
+
+Instead, it submits a typed purchase request to a protected authority/signer service.
+
+## Target flow
 
 ```text
 Human
   |
-  | signed mandate
+  | signs PurchasePermit
   v
-Virtual Haibin
+Virtual Haibin Agent
   |
-  | identity + policy check
+  | typed PurchaseRequest
   v
-External agent / service
+Authority / Signer Service
   |
-  | payment required
+  +-- authenticate caller
+  +-- verify permit signature
+  +-- verify service/capability
+  +-- verify recipient/mint/network
+  +-- verify expiry
+  +-- atomically reserve budget
+  +-- prevent replay
+  |
   v
-Virtual Haibin policy engine
+Solana payment
   |
-  +--> ALLOW -> payment -> result -> audit
+  v
+External service
   |
-  +--> DENY  -> reason -> audit
+  v
+Evidence receipt
 ```
 
-Example mandate:
+## Required demo cases
+
+### Case 1 — ALLOW
 
 ```text
-Agent: Virtual Haibin
-Capability: research
-Total budget: 0.05 USDC
-Max transaction: 0.02 USDC
-Expiry: 30 minutes
-```
-
-Example successful request:
-
-```text
-"Get a short market analysis. You may spend up to 0.05 USDC."
-
-Requested service: research
-Price: 0.01 USDC
-Capability: allowed
-Budget: allowed
-Expiry: valid
+Service: Research Agent
+Capability: research.summary
+Recipient: Wallet A
+Amount: 0.01
 
 Decision: ALLOW
-Payment: 0.01 USDC
+Payment: submitted and confirmed on Solana devnet
 Result: returned
-Audit: recorded
+Remaining delegated budget: 0.04
+Receipt: generated
 ```
 
-Example denied request:
+### Case 2 — DENY overspend
 
 ```text
-"Spend 0.10 USDC on another service."
+Service: Research Agent
+Recipient: Wallet A
+Amount: 0.10
 
 Decision: DENY
-Reason: exceeds delegated authority
-Audit: recorded
+Reason: per-call spending limit exceeded
+Payment: not submitted
 ```
+
+### Case 3 — DENY semantic mismatch
+
+```text
+Service: Research Agent
+Capability: research.summary
+Recipient: Wallet B
+Amount: 0.01
+
+Decision: DENY
+Reason: recipient is not authorized by the permit
+Payment: not submitted
+```
+
+This case is strategically important. A simple wallet spending limit can already reject Case 2. Case 3 demonstrates that the permission is bound to the intended service/payment semantics.
+
+### Case 4 — Replay protection
+
+Replay the invocation from Case 1.
+
+Expected behavior:
+
+- do not make a second payment
+- return the existing receipt or an explicit duplicate/replay decision
+- preserve a stable invocation/idempotency identity
+
+### Case 5 — Shared budget enforcement
+
+Multiple sequential or parallel 0.01 requests must not consume more than the delegated total budget.
+
+The budget must survive process restart and concurrent requests.
 
 ## MVP stages
 
-### MVP-0 — End-to-end skeleton
+### MVP-0 — Existing deterministic skeleton
 
-Goal: first working vertical slice with no blockchain dependency.
+Current repository state:
 
 ```text
-User
- -> Virtual Haibin
- -> Mock Policy
- -> Mock External Service
- -> Mock Payment
- -> Audit Record
+React UI
+ -> Virtual Haibin agent
+ -> mandate/policy evaluation
+ -> mock external service
+ -> simulated payment
+ -> in-memory audit
 ```
 
-Success criterion: one request passes through the complete architecture and produces a visible result.
+Current value:
 
-### MVP-1 — Mandate and policy
+- verifies runtime boundaries
+- provides ALLOW/DENY scaffolding
+- confirms monorepo/build/CI structure
 
-Introduce a reusable mandate model:
+Current limitations are intentional but must not be described as completed security functionality:
 
-```ts
-interface Mandate {
-  issuer: string;
-  agent: string;
-  capabilities: string[];
-  spending: {
-    token: "USDC";
-    maxPerTransaction: number;
-    maxTotal: number;
-  };
-  expiresAt: number;
-  nonce: string;
-  signature: string;
-}
-```
+- mock mandate signature
+- no cryptographic issuer verification
+- no protected signer
+- no persistent total-budget enforcement
+- no service/recipient/mint binding
+- no real replay protection
+- no real Solana settlement
+- no independently verifiable receipt
 
-Required checks:
+### MVP-1 — Signed purchase permit
 
-- issuer / agent identity
-- signature validity
-- allowed capability
-- per-transaction budget
-- total budget
+Replace the generic demo mandate with a narrow versioned purchase permit.
+
+The signed representation should bind at least:
+
+- format/version/domain
+- issuer identity/public key
+- authorized agent identity/public key
+- service identifier/origin
+- capability/operation
+- Solana cluster/network
+- token mint
+- payment recipient
+- per-call limit in integer token units
+- total budget in integer token units
+- issued-at and expiry
+- unique grant ID
+- explicit delegation/subdelegation rule
+
+Requirements:
+
+- stable canonical encoding
+- vetted signature implementation
+- strict parsing and bounds validation
+- tamper tests
+- expired-permit rejection
+
+Natural-language input may help produce these fields, but the user must review the concrete permission before signing.
+
+### MVP-2 — Protected signer / enforcement boundary
+
+Create a separate authority/signer service that owns or can access the development signing key.
+
+The agent runtime must not have direct unrestricted key access.
+
+The signer receives a typed purchase request and independently validates:
+
+- authenticated caller
+- permit signature
+- agent binding
+- service/capability
+- recipient
+- mint/network
+- amount
 - expiry
-- replay protection / nonce
+- invocation identity
+- remaining/reserved budget
 
-Required outcomes:
+The signer must construct or fully decode and validate the exact transaction before signing.
 
-- allowed valid request
-- denied overspend
-- denied unsupported capability
-- denied expired mandate
+It must never blindly sign arbitrary transaction bytes supplied by the autonomous agent.
 
-### MVP-2 — Solana
+### MVP-3 — Durable budget and replay state
 
-Replace mocks incrementally:
+Replace caller-supplied `alreadySpent` with authoritative durable state.
 
-```text
-mock wallet      -> development wallet
-mock signature   -> wallet-signed mandate
-mock transaction -> Solana transaction
-mock audit ref   -> transaction signature/hash
-```
-
-Do not make a custom Solana program a prerequisite unless mentor feedback or implementation evidence shows that it materially strengthens the submission.
-
-### MVP-3 — Machine-to-machine payment
-
-Target flow:
+Required lifecycle:
 
 ```text
-Virtual Haibin
- -> external service
- -> payment request
- -> policy check
- -> USDC/Solana payment
- -> service response
- -> audit
+request
+ -> reserve budget atomically
+ -> construct/sign
+ -> submit
+ -> reconcile confirmation
+ -> consume reservation
+ -> fulfill service
+ -> generate receipt
 ```
 
-Prefer existing infrastructure such as x402 where it is stable and useful.
+Requirements:
 
-### MVP-4 — Audit UI
+- integer token units; no floating-point currency accounting
+- atomic reservation
+- concurrency-safe total budget
+- idempotency/invocation IDs
+- replay protection
+- restart persistence
+- reconciliation after uncertain submission/confirmation
+- no automatic duplicate payment after timeout
 
-The UI should make the system understandable immediately:
+### MVP-4 — Real Solana devnet settlement
+
+Integrate one payment path only.
+
+Requirements:
+
+- dedicated development wallet
+- clearly identified devnet/test token mint
+- exact recipient validation
+- real Solana transaction signature
+- confirmation/reconciliation
+- transaction link/reference in the evidence record
+
+Prefer existing Solana/payment infrastructure where it reduces risk.
+
+Do not implement multiple payment protocols for the MVP.
+
+Do not make a custom Solana program a prerequisite unless an existing allowance mechanism cannot provide a required enforcement property and the additional complexity is justified.
+
+### MVP-5 — External service verification
+
+The external service should not merely trust an arbitrary `x-payment-reference` header.
+
+For the selected integration, it should verify the settlement/evidence required to release the service result.
+
+Keep the service deterministic enough that payment/authorization remains the focus of the demo.
+
+### MVP-6 — Evidence receipt and independent verifier
+
+Successful execution should produce an evidence bundle linking:
+
+- permit/grant ID
+- issuer
+- authorized agent
+- service/capability
+- request/quote identity or hash
+- policy decision and relevant rule
+- amount/mint/recipient/network
+- invocation/idempotency ID
+- Solana transaction signature
+- settlement state
+- result hash where useful
+
+A separate verifier should be able to validate the bundle without trusting the Virtual Haibin web UI.
+
+Be explicit about what the evidence proves and what it does not prove.
+
+For example:
+
+- it can prove that a particular permit was signed
+- it can prove that a particular Solana transaction settled
+- it does not prove that an external service's research output is truthful or valuable
+
+### MVP-7 — Judge-facing UI
+
+The primary screen should show:
 
 ```text
-TASK VH-001
+HUMAN PERMISSION
+Agent
+Service / capability
+Authorized recipient
+Mint / network
+Per-call cap
+Total / remaining / reserved budget
+Expiry
 
-Requested:        Market research
-Agent:            Virtual Haibin
-Authority:        Mandate VH-001
-Capability:       research
-Maximum spend:    0.05 USDC
-Actual spend:     0.01 USDC
-Policy decision:  ALLOW
-Provider:         Research Agent
-Transaction:      <Solana signature>
-Status:           COMPLETED
+PROPOSED PURCHASE
+Service
+Recipient
+Amount
+Invocation ID
+
+DECISION
+ALLOW / DENY
+Exact rule / reason
+
+EFFECT
+Payment submitted?
+Payment confirmed?
+Transaction signature
+Result
+Receipt
 ```
 
-## Reusable package direction
+Raw JSON belongs behind an inspection control rather than being the main presentation.
 
-Likely structure:
+## Demo sequence — 60 to 90 seconds
 
-```text
-apps/
-  web/
-  agent/
-  service-agent/
+### 0–12 seconds
 
-packages/
-  identity/
-  mandate/
-  policy/
-  payments/
-  audit/
-```
+Explain:
 
-The MVP use case may change after mentor feedback, but these packages should remain useful.
+> This agent has a valid identity, but that does not authorize every purchase.
 
-## MVP change policy
+Show and sign the permission once.
 
-After the Darren discussion, classify proposed changes:
+### 12–30 seconds
 
-### Green — change freely
-- demo use case
-- external service
-- UI wording
-- workflow specifics
-- mock vs real provider
+Execute the valid 0.01 purchase.
 
-### Yellow — change carefully
-- payment mechanism
-- identity integration
-- mandate representation
-- Solana implementation detail
+Show:
 
-### Red — preserve unless the thesis itself changes
-- verifiable identity
-- delegated authority
-- explicit policy
-- bounded autonomy
-- auditability
+- verified permission
+- budget reservation
+- confirmed Solana devnet transaction
+- service result
+- remaining budget
 
-This keeps the project adaptable without turning mentor feedback into a full restart.
+### 30–45 seconds
+
+Attempt 0.10 to the correct recipient.
+
+Show:
+
+- DENY
+- exact spending-limit rule
+- no new payment submitted
+
+### 45–60 seconds
+
+Attempt 0.01 to the wrong recipient or wrong authorized service.
+
+Show:
+
+- DENY despite the affordable amount
+- no payment submitted
+
+### 60–75 seconds
+
+Replay the successful invocation.
+
+Show:
+
+- existing receipt or duplicate rejection
+- no second transfer
+
+### 75–90 seconds
+
+Run the independent verifier against the receipt.
+
+End with:
+
+> The agent does not hold the unrestricted signing key. These are the exact permissions the signing boundary enforced.
+
+## Validation
+
+The central validation question is:
+
+> Does an agent/payment developer have an authorization, retry, overspend, recipient-substitution, or evidence problem that their existing wallet/payment stack does not solve conveniently?
+
+Strong evidence before submission:
+
+- one external developer integrates or tests the flow
+- one real paid-service developer identifies the same missing requirement
+- native wallet/provider controls are compared against the same guarantee
+- an integration demonstrates a failure case that Virtual Haibin handles more conveniently or clearly
+- mentor feedback confirms the wedge is understandable and relevant
+
+## Scope rule
+
+For the competition:
+
+- **95%** one working and validated workflow
+- **5%** reusable architecture required by that workflow
+
+Existing package boundaries can remain.
+
+Do not add generic framework layers merely because they might be useful later.
+
+## Explicitly deferred
+
+- generic agent identity registry
+- reputation
+- marketplaces
+- cross-chain
+- multiple wallet providers
+- multiple payment protocols
+- arbitrary delegation chains
+- enterprise IAM integrations
+- robotics / physical AI control
+- governance/tokenomics
+- multi-agent precedence/conflict resolution
+- general autonomous negotiation
+
+These remain possible long-term Virtual Haibin directions, not hackathon requirements.
