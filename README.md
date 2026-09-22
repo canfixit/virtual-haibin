@@ -305,6 +305,8 @@ Those areas are deliberately outside the current hackathon critical path.
 - [Hackathon Product Decision — 22 September 2026](docs/hackathon-decision-2026-09-22.md)
 - [Current MVP plan](docs/mvp-plan.md)
 - [World's Fair strategy](docs/strategy.md)
+- [Claude Code engineering instructions](CLAUDE.md)
+- [Claude Code Phase 1 handoff](docs/claude-handoff.md)
 - [Docker-first development](docs/docker-development.md)
 
 ## Security
