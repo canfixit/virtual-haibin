@@ -1,81 +1,140 @@
 # Virtual Haibin
 
-**Verifiable authority for AI agents.**
+**Verifiable spending permissions for AI agents.**
 
-Virtual Haibin is an autonomous AI agent project exploring how AI agents can act on behalf of humans with **verifiable identity, delegated authority, bounded permissions, auditable actions, and machine-to-machine payments**.
+Virtual Haibin is a developer-infrastructure project exploring how a human-approved paid service request can be bound to the exact Solana payment an autonomous agent is allowed to make, enforced at the signing boundary, and recorded as independently checkable evidence.
 
-The immediate goal is to build a focused MVP for the **Colosseum / Superteam Crypto World's Fair 2026** while keeping every core component useful for the longer-term Virtual Haibin platform.
+The longer-term thesis remains broader: **verifiable authority for autonomous agents**.
 
-## Product thesis
+The immediate goal is a focused MVP for the **Colosseum / Superteam Crypto World's Fair 2026**.
 
-AI agents are becoming capable of calling tools, interacting with services, and moving money. But giving an agent access to a wallet or API does not prove that it was legitimately authorised to act.
+## Hackathon thesis
 
-Virtual Haibin is exploring a model where a human or organisation can issue a constrained mandate describing:
+AI agents can increasingly call tools, interact with external services, and control wallets. But a valid agent identity or wallet does not prove that every payment the agent attempts is authorized.
 
-- who the agent is
-- what capabilities it may use
-- what services it may interact with
-- how much it may spend
-- when the authority expires
-- how actions can be verified and audited
+For the hackathon, Virtual Haibin focuses on one concrete question:
 
-The long-term thesis is that **IAM and blockchain should complement each other**:
+> Can a developer give an agent a narrow paid-service permission — this service, this capability, this recipient, this mint, this budget, this expiry — and enforce it at the signer so that the agent cannot silently widen it?
 
-- IAM defines identity, roles, permissions, capabilities, delegation, and policy.
-- Blockchain can provide verifiable authorization, settlement, tamper-resistant records, and independent auditability.
+The target integration is:
+
+```text
+human permission
+      ->
+exact service/API request
+      ->
+signer enforcement
+      ->
+exact Solana settlement
+      ->
+independently checkable evidence
+```
+
+The project is deliberately **not** claiming that agent identity, delegation, spending limits, policy engines, delegated signing, or audit logs are new concepts.
 
 ## Crypto World's Fair 2026
 
 The current competition strategy is approximately:
 
-- **70%** focused on a strong World's Fair vertical slice
-- **30%** focused on reusable Virtual Haibin platform foundations
+- **95%** focused on one working, validated hackathon workflow
+- **5%** reusable architecture strictly required by that workflow
 
-These are not separate projects. The hackathon MVP is intended to be the first deployable component of the broader system.
+The previous broader platform-first allocation has been retired for the competition phase.
 
-The exact MVP remains intentionally flexible until mentor and ecosystem feedback is incorporated.
+See:
 
-### Current candidate MVP
+- [Hackathon Product Decision — 22 September 2026](docs/hackathon-decision-2026-09-22.md)
+- [Current MVP plan](docs/mvp-plan.md)
+- [World's Fair strategy](docs/strategy.md)
 
-**Delegated autonomous commerce**
+## Target MVP
+
+A human signs a bounded purchase permit.
+
+Example:
 
 ```text
-Human / Organization
-        |
-        | signed mandate
-        v
+Agent: Virtual Haibin
+Service: Research Agent
+Capability: research.summary
+Recipient: <configured Solana recipient>
+Mint: <configured devnet token mint>
+Maximum per call: 0.02
+Total budget: 0.05
+Expiry: 30 minutes
+```
+
+The autonomous agent does **not** hold an unrestricted signing key.
+
+Instead:
+
+```text
+Human
+  |
+  | signs PurchasePermit
+  v
 Virtual Haibin Agent
-        |
-        +--> Identity
-        +--> Policy / Authority
-        +--> Wallet / Payments
-        +--> Audit
-        |
-        v
-External Agent / Service / Tool
+  |
+  | typed PurchaseRequest
+  v
+Authority / Signer Service
+  |
+  +-- verify permit signature
+  +-- authenticate agent
+  +-- verify service/capability
+  +-- verify recipient/mint/network
+  +-- enforce expiry
+  +-- reserve budget atomically
+  +-- prevent replay
+  |
+  v
+Solana settlement
+  |
+  v
+External service
+  |
+  v
+Evidence receipt
 ```
 
-A user delegates a bounded task and budget to Virtual Haibin. The agent verifies the mandate, checks policy, interacts with an external service, performs an allowed machine-to-machine payment, and records an auditable result.
+## Required demo cases
 
-A request outside the delegated authority should be denied rather than executed.
+The hackathon demo should prove more than a simple wallet spending cap.
 
-## Core architecture
+### ALLOW
 
 ```text
-apps/
-  web/             # User-facing dashboard
-  agent/           # Virtual Haibin runtime
-  service-agent/   # Demo / integration service
-
-packages/
-  identity/        # Agent and issuer identity
-  mandate/         # Delegation and signed authority
-  policy/          # Capability and spending decisions
-  payments/        # Solana / machine payment abstractions
-  audit/           # Verifiable action records
+0.01 -> authorized service -> authorized recipient
+ALLOW
 ```
 
-## Current development vertical slice
+### DENY — overspend
+
+```text
+0.10 -> authorized recipient
+DENY: exceeds per-call limit
+```
+
+### DENY — semantic mismatch
+
+```text
+0.01 -> wrong recipient or unauthorized service
+DENY: not authorized by the permit
+```
+
+This is strategically important: the payment is affordable, but still unauthorized.
+
+### REPLAY
+
+Replaying the successful invocation must not create a second payment.
+
+### SHARED BUDGET
+
+Sequential or concurrent requests must not exceed the total delegated budget.
+
+## Current implementation status
+
+The repository already contains a deterministic development vertical slice:
 
 ```text
 React UI
@@ -83,15 +142,69 @@ React UI
   -> mandate/policy evaluation
   -> mock external service agent
   -> simulated payment
-  -> audit record
+  -> in-memory audit record
 ```
 
-Two development cases are exposed in the UI:
+The current UI exposes:
 
 - an allowed 0.01 USDC-equivalent request
-- a denied 0.10 request that exceeds the mandate's 0.02 per-transaction limit
+- a denied 0.10 request exceeding the current per-transaction limit
 
-This is intentionally deterministic. Solana identity, signed mandates, and real payments will replace the mocked boundaries incrementally after the MVP direction is confirmed.
+This is scaffolding, not yet completed verifiable authorization.
+
+Current mocked/incomplete boundaries include:
+
+- mandate signature verification
+- signer isolation
+- persistent total-budget enforcement
+- service/recipient/mint binding
+- replay/idempotency state
+- real Solana settlement
+- independently verifiable evidence receipts
+
+The next implementation work replaces these boundaries incrementally.
+
+## Core architecture
+
+```text
+apps/
+  web/             # User-facing dashboard
+  agent/           # Autonomous agent runtime
+  service-agent/   # Demo / integration service
+
+packages/
+  identity/        # Agent and issuer identity models
+  mandate/         # Delegation / purchase permit representation
+  policy/          # Deterministic authorization decisions
+  payments/        # Solana/payment abstractions
+  audit/           # Action/evidence event models
+```
+
+A protected signer/enforcement service will be introduced as part of the narrowed MVP.
+
+## Engineering priorities
+
+Current order:
+
+```text
+signed purchase permit
+        ->
+protected signer / enforcement boundary
+        ->
+durable budget + replay/idempotency
+        ->
+real Solana devnet payment
+        ->
+service-side verification
+        ->
+evidence receipt + independent verifier
+        ->
+judge-facing UX
+        ->
+external developer validation
+```
+
+A custom Solana program is not a prerequisite. Existing Solana/payment primitives should be reused where they safely meet the required enforcement properties.
 
 ## Docker-first development
 
@@ -133,7 +246,7 @@ This starts:
 - Virtual Haibin agent: `http://localhost:4000`
 - mock service agent: `http://localhost:4001`
 
-Then open:
+Open:
 
 ```text
 http://localhost:5173
@@ -163,53 +276,35 @@ See [Docker-first development](docs/docker-development.md) for cloning, Git oper
 
 ## Design principles
 
-1. **Bounded autonomy** — agents should receive explicit, constrained authority rather than unlimited access.
-2. **Verifiable delegation** — an agent should be able to prove that it is authorised to perform an action.
-3. **Policy before execution** — identity, capability, budget, expiry, and other constraints should be checked before an irreversible action.
-4. **Auditability** — actions, policy decisions, and payments should be attributable and inspectable.
-5. **Composable infrastructure** — Virtual Haibin should integrate with existing Solana, payment, agent, and IAM infrastructure rather than rebuilding everything.
-6. **MVP first** — establish a working vertical slice before adding deeper protocol complexity.
-
-## Roadmap
-
-```text
-working end-to-end skeleton
-        ->
-delegation / mandate
-        ->
-policy enforcement
-        ->
-Solana integration
-        ->
-machine-to-machine payment
-        ->
-verifiable audit UX
-        ->
-external integrations / validation
-```
-
-Major features such as long-term memory, multi-agent marketplaces, robotics control, cross-chain support, reputation systems, and advanced multi-agent conflict resolution are deliberately deferred until the core authority model is validated.
+1. **Permission is not identity** — a valid agent identity does not imply authority for a particular purchase.
+2. **Enforce at execution** — policy must be enforced at the signing/payment boundary, not merely checked earlier in the agent workflow.
+3. **Bind semantics to settlement** — service, capability, recipient, mint, amount, network, and invocation identity must not drift between authorization and signing.
+4. **Bounded autonomy** — agents receive explicit, constrained authority rather than unrestricted keys.
+5. **Replay and concurrency matter** — total budgets require durable, atomic state and idempotency.
+6. **Evidence has limits** — receipts should state what they prove and what remains trusted offchain.
+7. **Reuse existing infrastructure** — do not rebuild wallet, identity, or payment primitives without a demonstrated reason.
+8. **One workflow first** — validate a real developer problem before expanding the platform.
 
 ## Longer-term direction
 
-Virtual Haibin is intended to grow beyond the hackathon into a personal autonomous AI/digital-agent architecture covering:
+Virtual Haibin's broader research direction still includes:
 
 - agent-to-agent interaction
 - identity and delegated authority
 - autonomous payments
 - secure tool execution
 - machine-to-machine trust
+- IAM integration
 - robotics / physical AI
 - policy and precedence between autonomous actors
 
-A longer-term research question is:
-
-> When autonomous agents or robots reach conflicting decisions, how should identity, authority, delegation, policy, and priority determine which decision takes precedence?
+Those areas are deliberately outside the current hackathon critical path.
 
 ## Project documents
 
-- [Strategy and World's Fair roadmap](docs/strategy.md)
-- [Provisional MVP plan](docs/mvp-plan.md)
+- [Hackathon Product Decision — 22 September 2026](docs/hackathon-decision-2026-09-22.md)
+- [Current MVP plan](docs/mvp-plan.md)
+- [World's Fair strategy](docs/strategy.md)
 - [Docker-first development](docs/docker-development.md)
 
 ## Security
