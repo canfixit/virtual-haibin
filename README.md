@@ -152,9 +152,11 @@ The current UI exposes:
 
 This is scaffolding, not yet completed verifiable authorization.
 
+Phase 1 adds a signed, versioned `PurchasePermit` v1 (`packages/mandate`: strict validation, RFC 8785 canonical signing payload, Ed25519 signing/verification via the Solana modular `@solana/addresses` / `@solana/keys` packages, integer atomic spending limits) and `evaluatePurchasePermit` (`packages/policy`: exact service/capability/network/mint/recipient checks with stable reason codes). Both are covered by automated tests but are **not yet wired into the running demo**: the agent still uses the deprecated legacy mandate/policy path until the Phase 2 authority service replaces it.
+
 Current mocked/incomplete boundaries include:
 
-- mandate signature verification
+- signed-permit enforcement in the running demo (the agent still uses the legacy unsigned mandate)
 - signer isolation
 - persistent total-budget enforcement
 - service/recipient/mint binding
@@ -174,7 +176,7 @@ apps/
 
 packages/
   identity/        # Agent and issuer identity models
-  mandate/         # Delegation / purchase permit representation
+  mandate/         # Signed PurchasePermit representation, validation, Ed25519 signing/verification
   policy/          # Deterministic authorization decisions
   payments/        # Solana/payment abstractions
   audit/           # Action/evidence event models

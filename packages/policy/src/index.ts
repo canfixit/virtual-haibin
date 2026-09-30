@@ -1,5 +1,8 @@
 import type { Mandate } from "@virtual-haibin/mandate";
 
+export { evaluatePurchasePermit } from "./purchase-permit.js";
+export type { PurchasePermitDecision, PurchasePermitReasonCode, PurchaseRequestV1 } from "./purchase-permit.js";
+
 export type PolicyRequest = {
   capability: string;
   amount: number;
@@ -13,6 +16,12 @@ export type PolicyDecision = {
   reasons: string[];
 };
 
+/**
+ * @deprecated Legacy scaffold policy, kept only so the existing demo agent
+ * keeps compiling until the authority service replaces it (Phase 2). It
+ * trusts caller-supplied alreadySpent and uses floating-point money. Use
+ * evaluatePurchasePermit with a verified SignedPurchasePermitV1 instead.
+ */
 export function evaluateMandate(
   mandate: Mandate,
   request: PolicyRequest,

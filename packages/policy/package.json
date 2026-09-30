@@ -5,9 +5,13 @@
   "type": "module",
   "exports": "./src/index.ts",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@virtual-haibin/mandate": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6"
   }
 }
