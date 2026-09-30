@@ -55,6 +55,7 @@ function reserveInput(invocationId: string, amountAtomic: string, overrides: Par
     request: request(invocationId, amountAtomic),
     amountAtomic,
     decidedAt: 1_000,
+    paymentRequirement: null,
     ...overrides,
   };
 }
@@ -349,19 +350,46 @@ test("the first stored receipt wins and receipts cannot be attached to undecided
   assert.equal((await store.getInvocation("inv-1"))?.receipt?.decidedAt, 1_000);
 });
 
-test("startup recovery moves only RESERVED invocations to RECONCILIATION_REQUIRED", async () => {
+test("startup recovery: RESERVED with an attempt -> RECONCILIATION_REQUIRED, without -> released", async () => {
   const store = new SqliteAuthorityStore(":memory:");
-  await store.reserve(reserveInput("inv-inflight", "10000"), allowAll);
+  await store.reserve(reserveInput("inv-sent", "10000"), allowAll);
+  await store.recordPaymentAttempt("inv-sent", {
+    protocol: "x402",
+    scheme: "exact",
+    settlementProfile: "solana-payment-sandbox",
+    network: "solana:test",
+    payer: "Payer111111111111111111111111111111111111111",
+    payerSignature: "sig-sent",
+    feePayer: "FeePayer1111111111111111111111111111111111",
+    asset: "Mint111111111111111111111111111111111111111",
+    payTo: "Recipient11111111111111111111111111111111111",
+    amountAtomic: "10000",
+    blockhash: "SURFNETxSAFEHASHxxxxxxxxxxxxxxxxxxx1ace1111",
+    lastValidBlockHeight: "1000",
+    resourceUrl: "http://paid.test/api/v1/research",
+    preparedAt: 1,
+  });
+  await store.reserve(reserveInput("inv-unsent", "10000"), allowAll);
   await store.reserve(reserveInput("inv-paid", "10000"), allowAll);
   await store.confirm("inv-paid", { transactionId: "tx-1", settledAt: 1 });
   await store.reserve(reserveInput("inv-denied", "60000"), budgetEvaluator("60000"));
+  assert.deepEqual(await grantAmounts(store), { reserved: "20000", consumed: "10000" });
 
-  assert.deepEqual(await store.recoverInterruptedInvocations("restart"), ["inv-inflight"]);
-  assert.equal((await store.getInvocation("inv-inflight"))?.state, "RECONCILIATION_REQUIRED");
+  assert.deepEqual(await store.recoverInterruptedInvocations("restart"), {
+    reconciliationRequired: ["inv-sent"],
+    releasedNeverSubmitted: ["inv-unsent"],
+  });
+  assert.equal((await store.getInvocation("inv-sent"))?.state, "RECONCILIATION_REQUIRED");
+  assert.equal((await store.getInvocation("inv-unsent"))?.state, "FAILED");
   assert.equal((await store.getInvocation("inv-paid"))?.state, "CONFIRMED");
   assert.equal((await store.getInvocation("inv-denied"))?.state, "DENIED");
+  // Only the possibly-submitted payment keeps its reservation.
   assert.deepEqual(await grantAmounts(store), { reserved: "10000", consumed: "10000" });
-  assert.deepEqual(await store.recoverInterruptedInvocations("restart"), []);
+  assert.deepEqual(await store.recoverInterruptedInvocations("restart"), { reconciliationRequired: [], releasedNeverSubmitted: [] });
+
+  // A process still in flight on the released row can no longer record an attempt (so it cannot transmit).
+  const lateAttempt = { ...(await store.getInvocation("inv-sent"))!.paymentAttempt!, payerSignature: "late" };
+  await assert.rejects(() => store.recordPaymentAttempt("inv-unsent", lateAttempt), InvalidStateTransitionError);
 });
 
 test("grant, invocation, receipt and transition history survive closing and reopening the database", async () => {
@@ -434,4 +462,112 @@ test("concurrent writers on separate connections (threads) never exceed the gran
   const store = new SqliteAuthorityStore(path);
   assert.deepEqual(await grantAmounts(store), { reserved: "25000", consumed: "0" });
   await store.close();
+});
+
+// ---------------------------------------------------------------------------
+// Schema v2: payment evidence and reconciliation (Phase 4)
+// ---------------------------------------------------------------------------
+
+function attemptFor(invocationId: string, amountAtomic = "20000") {
+  return {
+    protocol: "x402" as const,
+    scheme: "exact",
+    settlementProfile: "solana-payment-sandbox",
+    network: "solana:test",
+    payer: "Payer111111111111111111111111111111111111111",
+    payerSignature: `sig-${invocationId}`,
+    feePayer: "FeePayer1111111111111111111111111111111111",
+    asset: "Mint111111111111111111111111111111111111111",
+    payTo: "Recipient11111111111111111111111111111111111",
+    amountAtomic,
+    blockhash: "SURFNETxSAFEHASHxxxxxxxxxxxxxxxxxxx1ace1111",
+    lastValidBlockHeight: "1000",
+    resourceUrl: "http://paid.test/api/v1/research",
+    preparedAt: 1,
+  };
+}
+
+const settlementFor = (transactionId: string) => ({ transactionId, slot: "7", facilitatorReportedTransaction: null, confirmedAt: 2 });
+
+test("a v1 database migrates to v2 atomically and keeps all existing state", async () => {
+  const path = tempDbPath();
+  const current = new SqliteAuthorityStore(path);
+  await current.reserve(reserveInput("inv-old", "20000"), allowAll);
+  await current.confirm("inv-old", { transactionId: "tx-old", settledAt: 1 });
+  await current.close();
+
+  // Rewind to the Phase 3 (v1) schema.
+  const raw = new DatabaseSync(path);
+  for (const column of ["payment_requirement_json", "payment_attempt_json", "settlement_json", "result_json"]) {
+    raw.exec(`ALTER TABLE invocations DROP COLUMN ${column}`);
+  }
+  raw.exec("PRAGMA user_version = 1");
+  raw.close();
+
+  const migrated = new SqliteAuthorityStore(path);
+  const invocation = await migrated.getInvocation("inv-old");
+  assert.equal(invocation?.state, "CONFIRMED");
+  assert.equal(invocation?.paymentTransactionId, "tx-old");
+  assert.equal(invocation?.paymentAttempt, null);
+  assert.deepEqual(await grantAmounts(migrated), { reserved: "0", consumed: "20000" });
+  await migrated.close();
+
+  const check = new DatabaseSync(path);
+  const { user_version: version } = check.prepare("PRAGMA user_version").get() as { user_version: number };
+  check.close();
+  assert.equal(version, SQLITE_SCHEMA_VERSION);
+});
+
+test("a payment attempt is recorded once, only while RESERVED", async () => {
+  const store = new SqliteAuthorityStore(":memory:");
+  await store.reserve(reserveInput("inv-1", "20000"), allowAll);
+
+  await store.recordPaymentAttempt("inv-1", attemptFor("inv-1"));
+  assert.equal((await store.getInvocation("inv-1"))?.paymentAttempt?.payerSignature, "sig-inv-1");
+  await assert.rejects(() => store.recordPaymentAttempt("inv-1", attemptFor("inv-1")), InvalidStateTransitionError);
+
+  await store.reserve(reserveInput("inv-denied", "60000"), budgetEvaluator("60000"));
+  await assert.rejects(() => store.recordPaymentAttempt("inv-denied", attemptFor("inv-denied")), InvalidStateTransitionError);
+});
+
+test("reconciliation resolves only RECONCILIATION_REQUIRED, consuming or releasing exactly once", async () => {
+  const store = new SqliteAuthorityStore(":memory:");
+  await store.reserve(reserveInput("inv-landed", "20000"), allowAll);
+  await store.recordPaymentAttempt("inv-landed", attemptFor("inv-landed"));
+  await store.markReconciliationRequired("inv-landed", "timeout");
+  await store.reserve(reserveInput("inv-lost", "10000"), allowAll);
+  await store.recordPaymentAttempt("inv-lost", attemptFor("inv-lost", "10000"));
+  await store.markReconciliationRequired("inv-lost", "timeout");
+  assert.deepEqual(await grantAmounts(store), { reserved: "30000", consumed: "0" });
+  assert.deepEqual((await store.listReconciliationRequired()).map((invocation) => invocation.invocationId), ["inv-landed", "inv-lost"]);
+
+  const confirmed = await store.resolveReconciliation("inv-landed", { kind: "confirmed", settlement: settlementFor("tx-late") });
+  assert.equal(confirmed.state, "CONFIRMED");
+  assert.equal(confirmed.paymentTransactionId, "tx-late");
+  await store.resolveReconciliation("inv-lost", { kind: "failed", reason: "expired" });
+  assert.equal((await store.getInvocation("inv-lost"))?.state, "FAILED");
+  assert.deepEqual(await grantAmounts(store), { reserved: "0", consumed: "20000" });
+
+  // Neither can be resolved twice, and non-RRQ invocations cannot be resolved at all.
+  await assert.rejects(() => store.resolveReconciliation("inv-landed", { kind: "confirmed", settlement: settlementFor("tx-x") }), InvalidStateTransitionError);
+  await assert.rejects(() => store.resolveReconciliation("inv-lost", { kind: "failed", reason: "x" }), InvalidStateTransitionError);
+  assert.deepEqual(await grantAmounts(store), { reserved: "0", consumed: "20000" });
+  assert.deepEqual(await store.listReconciliationRequired(), []);
+});
+
+test("retrying a FAILED invocation starts a fresh attempt with no stale payment evidence", async () => {
+  const store = new SqliteAuthorityStore(":memory:");
+  const input = reserveInput("inv-1", "20000");
+  await store.reserve(input, allowAll);
+  await store.recordPaymentAttempt("inv-1", attemptFor("inv-1"));
+  await store.markReconciliationRequired("inv-1", "timeout");
+  await store.resolveReconciliation("inv-1", { kind: "failed", reason: "expired" });
+
+  const retry = await store.reserve(input, allowAll);
+  assert.equal(retry.kind, "reserved");
+  const invocation = await store.getInvocation("inv-1");
+  assert.equal(invocation?.paymentAttempt, null);
+  assert.equal(invocation?.settlement, null);
+  assert.equal(invocation?.paymentTransactionId, null);
+  assert.deepEqual(await grantAmounts(store), { reserved: "20000", consumed: "0" });
 });

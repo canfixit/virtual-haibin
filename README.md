@@ -58,7 +58,8 @@ Agent: Virtual Haibin
 Service: Research Agent
 Capability: research.summary
 Recipient: <configured Solana recipient>
-Mint: <configured devnet token mint>
+Network: solana-payment-sandbox (Pay.sh Solana Payment Sandbox)
+Mint: <configured sandbox token mint>
 Maximum per call: 0.02
 Total budget: 0.05
 Expiry: 30 minutes
@@ -134,41 +135,47 @@ Sequential or concurrent requests must not exceed the total delegated budget.
 
 ## Current implementation status
 
-The repository now contains a deterministic development vertical slice with a real signer boundary:
+The repository contains an end-to-end vertical slice in which an agent's purchase is authorized by Virtual Haibin and settled with a real x402 payment on the **Pay.sh Solana Payment Sandbox** (a hosted Surfpool test validator; no real funds):
 
 ```text
 React UI
-  -> Virtual Haibin agent (builds a typed purchase request; holds no signing key)
-  -> Authority service (verifies the signed permit, evaluates policy, reserves budget, pays, signs a decision receipt)
-  -> mock external service agent
-  -> simulated payment
-  -> in-memory audit record
+  -> Virtual Haibin agent (signs a typed purchase request with a non-spending identity key)
+  -> Authority service
+       verifies the signed permit and the agent's request signature
+       fetches the paid service's real HTTP 402 x402 challenge (trusted URL only)
+       validates the challenge against the settlement profile, the request and the permit
+       reserves budget atomically in SQLite
+       signs the x402 "exact" payment with its own payment wallet
+  -> paid mock service (Pay Kit x402 gate; its facilitator settles on the sandbox)
+  -> authority confirms settlement on the pinned sandbox RPC, stores evidence, returns the paid result
 ```
+
+**Who does what.** Pay.sh / Solana Pay Kit (`@solana/pay-kit` on the service, `@x402/core` + `@x402/svm` on the authority) provide the payment protocol and settlement rail: the x402 v2 402 challenge, the `exact` SPL transfer, the facilitator that verifies and submits it. Virtual Haibin provides delegated authority on top of that rail: the signed PurchasePermit, agent authentication, semantic policy (service, capability, recipient, asset, amount), durable budget, replay/conflict protection and reconciliation. Virtual Haibin did not invent x402 and does not re-implement it. See [docs/payments-x402-sandbox.md](docs/payments-x402-sandbox.md) for the trust model.
 
 The current UI exposes:
 
-- an allowed 10000-atomic-unit request (0.01 of a 6-decimal demo token, not USDC)
-- a denied 100000-atomic-unit request exceeding the per-call limit
-- a denied 10000-atomic-unit request where the service quotes an unauthorized recipient (semantic DENY)
+- an allowed paid request: 0.01 sandbox USDC (`"10000"` base units) settled on the sandbox, returning the paid result
+- a merchant that overcharges in its real 402 (challenge asks `"100000"`): denied, nothing signed
+- a merchant whose 402 redirects payment to another address: denied (`RECIPIENT_MISMATCH`), nothing signed
+- a merchant whose 402 asks for a different asset (sandbox USDT): denied (`ASSET_NOT_ALLOWED`, `MINT_MISMATCH`), nothing signed
 
-Reusing an `invocationId` with the same request is idempotent (no second payment); reusing it with a different request returns HTTP 409 `INVOCATION_CONFLICT` with no payment and no budget change.
+Reusing an `invocationId` with the same request returns the stored result with no second payment and no second contact with the service; reusing it with a different request returns HTTP 409 `INVOCATION_CONFLICT` with no payment and no budget change.
 
-Money on the agent -> authority path is integer atomic units as canonical decimal strings end to end. The mock service's `/quote` returns the authoritative `service`, `capability`, `network`, `mint`, `recipient` and `amountAtomic` (display label/decimals are separate and never used for authorization), and the agent forwards those fields verbatim to the authority.
+All money is integer base units as canonical decimal strings end to end; decimals are never assumed (the mint's decimals come from chain via the pinned RPC). The full JSON (receipt, payment evidence, paid result) is in the UI's raw output panel; a judge-facing view comes in Phase 7.
 
-The full request/response JSON (including the authority's signed receipt) is visible via the UI's raw output panel; a dedicated judge-facing view comes in Phase 7.
+Current limitations and remaining boundaries:
 
-Current mocked/incomplete boundaries include:
+- **sandbox only** -- the only settlement profile is `solana-payment-sandbox`. Its challenges advertise mainnet's CAIP-2 id and the mainnet USDC mint address (the sandbox clones mainnet), so the challenge alone cannot prove the settlement environment; the guarantee comes from the authority-pinned sandbox RPC and authority-fetched sandbox blockhash (see the doc above). No public devnet or mainnet path exists.
+- **sandbox USDC** is the mainnet USDC mint address as cloned into the sandbox; it has no real value and wallets are funded with Surfnet cheatcodes
+- durable state is single-node SQLite (`/data/authority.db` on the `authority_data` volume) behind an `AuthorityStore` interface; no replication/backup, and startup recovery assumes a single authority process
+- the authority's receipt-signing key and payment wallet are ephemeral per process; stored receipts stay verifiable against the address they name, and reconciliation needs only the stored payer signature, not the key
+- the paid service only receives payment through Pay Kit's own x402 verification; it does not yet verify Virtual Haibin's authorization evidence (Phase 5)
+- the authority signs a decision receipt, but there is no standalone evidence bundle or independent verifier yet (Phase 6)
+- agent identity is ephemeral: the agent generates a fresh non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds), and the demo permit is issued to it at startup by a simulated human issuer in the same process
+- agent-to-authority transport authentication is a dev-only shared bearer secret (`AUTHORITY_SHARED_SECRET` in the gitignored `.env`); it is never treated as proof of agent identity -- the agent's request signature is
+- an invocation whose payment outcome is unknown is durably `RECONCILIATION_REQUIRED` (HTTP 409) with its budget reserved; reconciliation resolves it read-only against the sandbox (landed -> `CONFIRMED`; not landed and blockhash expired -> `FAILED`, reservation released). An invocation interrupted before its payment attempt was recorded was provably never transmitted (the attempt is durably committed before the credential can leave the authority), so startup recovery releases it as `FAILED`.
 
-- durable state is single-node SQLite -- grant budgets (reserved/consumed), invocation ids, fingerprints, states and stored receipts live in `/data/authority.db` on the `authority_data` Docker volume (`apps/authority/src/store/`), behind an `AuthorityStore` interface; they survive process and container restarts, but there is no replication/backup, and startup recovery assumes a single authority process
-- the authority's receipt-signing key is still ephemeral per process: receipts stored before a restart remain verifiable against the authority address they name, but the authority's identity changes on every restart
-- real Solana settlement -- payment is still `MockPaymentProvider` (`packages/payments`); no devnet transaction exists yet
-- service-side payment verification -- `apps/service-agent`'s `/execute` still trusts an arbitrary `x-payment-reference` header
-- independently verifiable evidence receipts -- the authority signs a decision receipt (`apps/authority/src/receipt.ts`) proving *it* made the decision, but this is not yet the full Phase 6 evidence bundle (no Solana settlement or service-result linkage yet), and there is no independent verifier tool
-- agent identity is ephemeral: the agent generates a fresh, non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds), and the demo permit is issued to that identity at startup by a simulated human issuer running in the same process; persistent agent identity storage and out-of-process permit issuance are future work
-- agent-to-authority transport authentication is a shared dev-only bearer secret (`AUTHORITY_SHARED_SECRET`, supplied at runtime from the gitignored `.env`); it is **not** treated as proof of agent identity -- every `/authorize` call must carry the agent's signature over a domain-separated request bound to the exact permit (SHA-256 digest), the authority audience, the invocation and all payment fields, verified against the permit's `authorizedAgent`
-- a payment attempt whose outcome is unknown -- provider error/timeout, a payment that could not be recorded, or an authority restart mid-payment -- durably blocks that invocation as `RECONCILIATION_REQUIRED` (HTTP 409) with its budget still reserved; there is no reconciliation procedure yet to resolve it (that needs real settlement, Phase 4)
-
-The next implementation work replaces these boundaries incrementally.
+CI (`.github/workflows/ci.yml`) has two jobs: a deterministic job (frozen install, all unit/security/persistence/payment-protocol tests with local fakes, typecheck/build inside the project image; no external network needed by tests) and a clearly labelled external integration job that starts the stack against the Pay.sh sandbox and runs `scripts/sandbox-integration.mjs`, with a separate sandbox-availability preflight.
 
 ## Core architecture
 
@@ -198,7 +205,7 @@ protected signer / enforcement boundary
         ->
 durable budget + replay/idempotency
         ->
-real Solana devnet payment
+real Solana settlement (x402 on the Pay.sh Solana Payment Sandbox)
         ->
 service-side verification
         ->

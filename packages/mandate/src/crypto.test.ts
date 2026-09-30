@@ -43,6 +43,7 @@ const tamperCases: Array<{ name: string; overrides: Partial<UnsignedPurchasePerm
   { name: "authorizedAgent", overrides: { authorizedAgent: strangerAddress1 } },
   { name: "service", overrides: { service: "other-service" } },
   { name: "capability", overrides: { capability: "other.capability" } },
+  { name: "network", overrides: { network: "solana-payment-sandbox" } },
   { name: "mint", overrides: { mint: strangerAddress2 } },
   { name: "recipient", overrides: { recipient: strangerAddress3 } },
   { name: "maxPerCallAtomic", overrides: { maxPerCallAtomic: "25000" } },
@@ -62,7 +63,7 @@ for (const { name, overrides } of tamperCases) {
   });
 }
 
-test("mutating network fails (only one supported network exists, so schema validation catches it)", async () => {
+test("mutating network to an unsupported value fails schema validation", async () => {
   const tampered = { ...validSigned, network: "mainnet-beta" };
   const result = await verifyPurchasePermit(tampered);
   assert.equal(result.verified, false);

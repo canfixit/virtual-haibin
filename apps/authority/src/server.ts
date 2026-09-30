@@ -45,6 +45,18 @@ async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
   }
 }
 
+async function drain(request: IncomingMessage): Promise<void> {
+  let total = 0;
+
+  for await (const chunk of request) {
+    total += (chunk as Buffer).byteLength;
+
+    if (total > MAX_BODY_BYTES) {
+      throw new HttpInputError("Request body too large.", 413);
+    }
+  }
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -123,7 +135,22 @@ export function createAuthorityServer(options: AuthorityServerOptions): Server {
           decision: result.receipt.decision,
           replay: result.replay,
           receipt: result.receipt,
+          payment: result.payment,
+          result: result.result,
         });
+        return;
+      }
+
+      // Operator-triggered reconciliation of RECONCILIATION_REQUIRED
+      // invocations. Read-only toward the chain; never pays.
+      if (request.method === "POST" && request.url === "/reconcile") {
+        if (!isAuthorized(request)) {
+          sendJson(response, 401, { error: "Unauthorized" });
+          return;
+        }
+
+        await drain(request);
+        sendJson(response, 200, { reports: await authorityService.reconcile() });
         return;
       }
 

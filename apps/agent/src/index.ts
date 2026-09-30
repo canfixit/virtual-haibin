@@ -58,7 +58,6 @@ const auditLog = new InMemoryAuditLog();
 
 /** Same canonical form as PurchasePermit amounts: integer string, no sign/decimal/leading zeros. */
 const ATOMIC_AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,19})$/;
-const DEFAULT_AMOUNT_ATOMIC = "10000";
 const INVOCATION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 // Simulates the human's one-time signing step from the target architecture
@@ -72,8 +71,9 @@ async function createDemoPermit(): Promise<SignedPurchasePermitV1> {
   const issuer = await getAddressFromPublicKey(issuerKeypair.publicKey);
   const issuedAt = Date.now();
 
-  if (demoNetwork !== "devnet") {
-    throw new Error("VH_DEMO_NETWORK must be devnet for the hackathon demo.");
+  // Phase 4 settles only on the Solana Payment Sandbox (no real funds).
+  if (demoNetwork !== "solana-payment-sandbox") {
+    throw new Error("VH_DEMO_NETWORK must be solana-payment-sandbox for the hackathon demo.");
   }
 
   return signPurchasePermit(
@@ -88,7 +88,7 @@ async function createDemoPermit(): Promise<SignedPurchasePermitV1> {
       network: demoNetwork,
       mint: demoMint,
       recipient: demoServiceRecipient,
-      // 0.02 / 0.05 of a 6-decimal demo token, expressed directly in atomic units.
+      // 0.02 / 0.05 sandbox USDC (6-decimal mint), expressed directly in base units.
       maxPerCallAtomic: "20000",
       maxTotalAtomic: "50000",
       issuedAt,
@@ -102,10 +102,17 @@ async function createDemoPermit(): Promise<SignedPurchasePermitV1> {
 const demoPermit = await createDemoPermit();
 const demoPermitDigest = await computePermitDigest(demoPermit);
 
-type DemoScenario = "honest" | "wrong-recipient";
+/**
+ * DEMO FAULT INJECTION for the mock merchant. "honest" pays normally; the
+ * others make the merchant's *real* 402 challenge differ from its advertised
+ * quote (price, recipient or asset) so the authority's validation is visible.
+ */
+const DEMO_SCENARIOS = ["honest", "overcharge", "wrong-recipient", "wrong-asset", "lost-response", "drop-credential"] as const;
+type DemoScenario = (typeof DEMO_SCENARIOS)[number];
 
 type DemoInput = {
-  amountAtomic: string;
+  /** Optional override of the amount the agent signs (defaults to the quoted amount). */
+  amountAtomic: string | null;
   invocationId: string;
   scenario: DemoScenario;
 };
@@ -168,9 +175,9 @@ function parseDemoInput(body: unknown): DemoInput {
     );
   }
 
-  const amountAtomic = body.amountAtomic ?? DEFAULT_AMOUNT_ATOMIC;
+  const amountAtomic = body.amountAtomic ?? null;
 
-  if (typeof amountAtomic !== "string" || !ATOMIC_AMOUNT_PATTERN.test(amountAtomic)) {
+  if (amountAtomic !== null && (typeof amountAtomic !== "string" || !ATOMIC_AMOUNT_PATTERN.test(amountAtomic))) {
     throw new HttpInputError("amountAtomic must be a canonical non-negative integer string.", 400);
   }
 
@@ -182,11 +189,11 @@ function parseDemoInput(body: unknown): DemoInput {
 
   const scenario = body.scenario ?? "honest";
 
-  if (scenario !== "honest" && scenario !== "wrong-recipient") {
-    throw new HttpInputError('scenario must be "honest" or "wrong-recipient".', 400);
+  if (typeof scenario !== "string" || !(DEMO_SCENARIOS as readonly string[]).includes(scenario)) {
+    throw new HttpInputError(`scenario must be one of: ${DEMO_SCENARIOS.join(", ")}.`, 400);
   }
 
-  return { amountAtomic, invocationId, scenario };
+  return { amountAtomic, invocationId, scenario: scenario as DemoScenario };
 }
 
 type AuthorizeResponseBody = {
@@ -201,6 +208,8 @@ type AuthorizeResponseBody = {
     decidedAt: number;
     signature: { algorithm: string; signature: string };
   };
+  payment: { transactionId: string | null } & Record<string, unknown> | null;
+  result: unknown;
 };
 
 function setCors(response: ServerResponse) {
@@ -244,20 +253,25 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 }
 
 async function runDemo(input: DemoInput) {
-  const quoteUrl = new URL("/quote", serviceAgentUrl);
-  quoteUrl.searchParams.set("amountAtomic", input.amountAtomic);
-
-  if (input.scenario === "wrong-recipient") {
-    quoteUrl.searchParams.set("scenario", "wrong-recipient");
-  }
-
-  const quoteResponse = await fetch(quoteUrl);
+  const quoteResponse = await fetch(new URL("/quote", serviceAgentUrl));
 
   if (!quoteResponse.ok) {
     throw new Error(`Service quote failed with status ${quoteResponse.status}.`);
   }
 
   const quote = parseServiceQuote(await quoteResponse.json());
+
+  if (input.scenario !== "honest") {
+    const scenarioResponse = await fetch(new URL("/__demo/scenario", serviceAgentUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ invocationId: input.invocationId, scenario: input.scenario }),
+    });
+
+    if (!scenarioResponse.ok) {
+      throw new Error(`Demo scenario setup failed with status ${scenarioResponse.status}.`);
+    }
+  }
 
   // Forward the quote's authoritative fields verbatim. The agent does not
   // substitute values from the permit: the authority must see what the
@@ -275,7 +289,7 @@ async function runDemo(input: DemoInput) {
     network: quote.network,
     mint: quote.mint,
     recipient: quote.recipient,
-    amountAtomic: quote.amountAtomic,
+    amountAtomic: input.amountAtomic ?? quote.amountAtomic,
     issuedAt: Date.now(),
   };
   const agentSignature = await signAuthorizationRequest(authorizationRequest, agentIdentity);
@@ -289,7 +303,7 @@ async function runDemo(input: DemoInput) {
     body: JSON.stringify({ permit: demoPermit, authorizationRequest, agentSignature }),
   });
 
-  if (authorizeResponse.status === 401 || authorizeResponse.status === 409) {
+  if ([401, 409, 502].includes(authorizeResponse.status)) {
     const refusal = (await authorizeResponse.json()) as { reasonCode?: string };
     return {
       // e.g. INVOCATION_CONFLICT, RECONCILIATION_REQUIRED, AGENT_SIGNATURE_INVALID
@@ -330,29 +344,16 @@ async function runDemo(input: DemoInput) {
     };
   }
 
-  const executionResponse = await fetch(`${serviceAgentUrl}/execute`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-payment-reference": authorization.receipt.paymentTransactionId ?? "",
-    },
-    body: JSON.stringify({
-      task: "Provide a concise market summary.",
-      grantId: demoPermit.grantId,
-    }),
-  });
-
-  if (!executionResponse.ok) {
-    throw new Error(`Service execution failed with status ${executionResponse.status}.`);
-  }
-
-  const result = (await executionResponse.json()) as unknown;
+  // The authority performed the paid HTTP call (402 -> validated payment ->
+  // retry with proof) and returns the protected result; the agent never
+  // holds a payment key or payment credential.
+  const result = authorization.result;
 
   auditLog.append({
     type: "service.completed",
     actor: demoPermit.authorizedAgent,
     mandateId: demoPermit.grantId,
-    data: { service: quote.service },
+    data: { service: quote.service, transactionId: authorization.payment?.transactionId ?? null },
   });
 
   return {

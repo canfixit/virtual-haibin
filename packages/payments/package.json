@@ -5,6 +5,15 @@
   "type": "module",
   "exports": "./src/index.ts",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test 'src/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@solana/kit": "^6.10.0",
+    "@x402/core": "2.27.0",
+    "@x402/svm": "2.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6"
   }
 }

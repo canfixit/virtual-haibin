@@ -1,4 +1,5 @@
 import type { AuthorizationRequestV1 } from "@virtual-haibin/mandate";
+import type { ConfirmedSettlement, PaidResult, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
 import type { SignedAuthorizationReceiptV1 } from "../receipt.js";
 
 /**
@@ -27,14 +28,29 @@ export interface AuthorityStore {
    */
   reserve(input: ReserveInput, evaluate: BudgetEvaluator): Promise<ReserveResult>;
 
-  /** RESERVED -> CONFIRMED; moves the amount from reserved to consumed. */
-  confirm(invocationId: string, payment: { transactionId: string; settledAt: number }): Promise<InvocationRecord>;
+  /**
+   * Records the payment attempt (payer signature, blockhash, expiry) on a
+   * RESERVED invocation. Must succeed *before* the credential is transmitted,
+   * so a crash afterwards can still be reconciled.
+   */
+  recordPaymentAttempt(invocationId: string, attempt: PaymentAttempt): Promise<void>;
+
+  /** RESERVED -> CONFIRMED; moves the amount from reserved to consumed and stores settlement evidence. */
+  confirm(invocationId: string, payment: ConfirmPayment): Promise<InvocationRecord>;
 
   /** RESERVED -> FAILED; releases the reservation. Only for payments known never to have been submitted. */
   fail(invocationId: string, reason: string): Promise<void>;
 
   /** RESERVED -> RECONCILIATION_REQUIRED; the reservation stays held. */
   markReconciliationRequired(invocationId: string, reason: string): Promise<void>;
+
+  /**
+   * RECONCILIATION_REQUIRED -> CONFIRMED (reserved becomes consumed) or
+   * -> FAILED (reservation released), based on an on-chain lookup.
+   */
+  resolveReconciliation(invocationId: string, outcome: ReconciliationOutcome): Promise<InvocationRecord>;
+
+  listReconciliationRequired(): Promise<InvocationRecord[]>;
 
   /** Stores the signed receipt for a DENIED or CONFIRMED invocation (first receipt wins). */
   attachReceipt(invocationId: string, receipt: SignedAuthorizationReceiptV1): Promise<SignedAuthorizationReceiptV1>;
@@ -44,12 +60,16 @@ export interface AuthorityStore {
   getGrant(issuer: string, grantId: string): Promise<GrantRecord | null>;
 
   /**
-   * Startup recovery for a single authority process: any invocation still
-   * RESERVED was interrupted mid-payment, so its outcome is unknown. Moves
-   * them to RECONCILIATION_REQUIRED (never back to a payable state) and
-   * returns their ids.
+   * Startup recovery for invocations left RESERVED by an interrupted process,
+   * decided atomically per row:
+   * - a payment attempt was recorded -> the credential may have been
+   *   transmitted -> RECONCILIATION_REQUIRED (reservation kept);
+   * - no attempt recorded -> by the PaymentProvider ordering contract the
+   *   credential was never transmitted -> FAILED (reservation released).
+   * Because recordPaymentAttempt only succeeds on RESERVED rows, a process
+   * still in flight cannot transmit after its row was released here.
    */
-  recoverInterruptedInvocations(reason: string): Promise<string[]>;
+  recoverInterruptedInvocations(reason: string): Promise<RecoveryResult>;
 
   close(): Promise<void>;
 }
@@ -73,6 +93,24 @@ export type ReserveInput = {
   request: AuthorizationRequestV1;
   amountAtomic: string;
   decidedAt: number;
+  /** The validated payment requirement from the service's 402 challenge, if one was obtained. */
+  paymentRequirement: PaymentRequirement | null;
+};
+
+export type ConfirmPayment = {
+  transactionId: string;
+  settledAt: number;
+  settlement?: ConfirmedSettlement;
+  result?: PaidResult | null;
+};
+
+export type ReconciliationOutcome =
+  | { kind: "confirmed"; settlement: ConfirmedSettlement }
+  | { kind: "failed"; reason: string };
+
+export type RecoveryResult = {
+  reconciliationRequired: string[];
+  releasedNeverSubmitted: string[];
 };
 
 export type BudgetDecision = { allowed: true } | { allowed: false; reasonCodes: string[] };
@@ -97,6 +135,10 @@ export type InvocationRecord = {
   state: InvocationState;
   reasonCodes: string[];
   paymentTransactionId: string | null;
+  paymentRequirement: PaymentRequirement | null;
+  paymentAttempt: PaymentAttempt | null;
+  settlement: ConfirmedSettlement | null;
+  result: PaidResult | null;
   receipt: SignedAuthorizationReceiptV1 | null;
   stateReason: string | null;
   decidedAt: number;
@@ -113,7 +155,7 @@ export type GrantRecord = GrantTerms & {
 
 /** A state transition was attempted from a state that does not allow it. */
 export class InvalidStateTransitionError extends Error {
-  constructor(invocationId: string, expected: InvocationState, action: string) {
+  constructor(invocationId: string, expected: InvocationState | string, action: string) {
     super(`Invocation ${invocationId} is not ${expected}; cannot ${action}.`);
     this.name = "InvalidStateTransitionError";
   }

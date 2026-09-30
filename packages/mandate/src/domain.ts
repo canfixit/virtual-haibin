@@ -9,10 +9,18 @@ export const PURCHASE_PERMIT_DOMAIN = "virtual-haibin/purchase-permit";
 export const PURCHASE_PERMIT_VERSION = 1;
 
 /**
- * Solana clusters the permit may authorize. Restricted to devnet for the
- * hackathon MVP; mainnet-beta is intentionally excluded until real-funds use
- * is explicitly approved (see CLAUDE.md security invariants).
+ * Settlement environments a permit may authorize. These are Virtual Haibin
+ * names, not chain identifiers: the authority maps each one to a trusted
+ * settlement profile (RPC, accepted challenge networks, allowed assets).
+ *
+ * - "solana-payment-sandbox": the Pay.sh / Surfpool Solana Payment Sandbox
+ *   (a hosted test validator; no real funds). Phase 4 settlement target.
+ * - "devnet": Solana public devnet. Accepted by the schema; no authority
+ *   settlement profile exists for it yet, so such permits cannot pay.
+ *
+ * mainnet is intentionally excluded until real-funds use is explicitly
+ * approved (see CLAUDE.md security invariants).
  */
-export const SUPPORTED_NETWORKS = ["devnet"] as const;
+export const SUPPORTED_NETWORKS = ["solana-payment-sandbox", "devnet"] as const;
 
 export type SupportedNetwork = (typeof SUPPORTED_NETWORKS)[number];

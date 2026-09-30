@@ -1,13 +1,17 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import type { AuthorizationRequestV1 } from "@virtual-haibin/mandate";
+import type { ConfirmedSettlement, PaidResult, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
 import type { SignedAuthorizationReceiptV1 } from "../receipt.js";
 import {
   InvalidStateTransitionError,
   type AuthorityStore,
   type BudgetEvaluator,
+  type ConfirmPayment,
   type GrantRecord,
   type InvocationRecord,
   type InvocationState,
+  type ReconciliationOutcome,
+  type RecoveryResult,
   type ReserveInput,
   type ReserveResult,
 } from "./types.js";
@@ -26,7 +30,7 @@ import {
  * Amounts are stored as canonical decimal TEXT and computed with BigInt:
  * SQLite INTEGER is signed 64-bit and cannot hold the full u64 token range.
  */
-export const SQLITE_SCHEMA_VERSION = 1;
+export const SQLITE_SCHEMA_VERSION = 2;
 
 export type SqliteAuthorityStoreOptions = {
   now?: () => number;
@@ -88,6 +92,23 @@ CREATE TABLE invocation_transitions (
 ) STRICT;
 `;
 
+/**
+ * v2 (Phase 4): durable payment evidence per invocation -- the validated
+ * challenge requirement, the pre-transmission payment attempt (needed for
+ * reconciliation), the confirmed settlement and a bounded paid result.
+ */
+const SCHEMA_V2 = `
+ALTER TABLE invocations ADD COLUMN payment_requirement_json TEXT;
+ALTER TABLE invocations ADD COLUMN payment_attempt_json TEXT;
+ALTER TABLE invocations ADD COLUMN settlement_json TEXT;
+ALTER TABLE invocations ADD COLUMN result_json TEXT;
+`;
+
+const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
+  { version: 1, sql: SCHEMA_V1 },
+  { version: 2, sql: SCHEMA_V2 },
+];
+
 const MAX_U64 = 18446744073709551615n;
 
 type InvocationRow = {
@@ -102,6 +123,10 @@ type InvocationRow = {
   reason_codes_json: string;
   payment_transaction_id: string | null;
   receipt_json: string | null;
+  payment_requirement_json: string | null;
+  payment_attempt_json: string | null;
+  settlement_json: string | null;
+  result_json: string | null;
   state_reason: string | null;
   decided_at: number;
   created_at: number;
@@ -119,6 +144,10 @@ type GrantRow = {
   updated_at: number;
 };
 
+function parseOrNull<T>(json: string | null): T | null {
+  return json === null ? null : (JSON.parse(json) as T);
+}
+
 function toInvocation(row: InvocationRow): InvocationRecord {
   return {
     invocationId: row.invocation_id,
@@ -131,7 +160,11 @@ function toInvocation(row: InvocationRow): InvocationRecord {
     state: row.state,
     reasonCodes: JSON.parse(row.reason_codes_json) as string[],
     paymentTransactionId: row.payment_transaction_id,
-    receipt: row.receipt_json === null ? null : (JSON.parse(row.receipt_json) as SignedAuthorizationReceiptV1),
+    paymentRequirement: parseOrNull<PaymentRequirement>(row.payment_requirement_json),
+    paymentAttempt: parseOrNull<PaymentAttempt>(row.payment_attempt_json),
+    settlement: parseOrNull<ConfirmedSettlement>(row.settlement_json),
+    result: parseOrNull<PaidResult>(row.result_json),
+    receipt: parseOrNull<SignedAuthorizationReceiptV1>(row.receipt_json),
     stateReason: row.state_reason,
     decidedAt: row.decided_at,
     createdAt: row.created_at,
@@ -161,6 +194,9 @@ export class SqliteAuthorityStore implements AuthorityStore {
     | "updateInvocationDecision"
     | "updateInvocationState"
     | "confirmInvocation"
+    | "recordAttempt"
+    | "resolveConfirmed"
+    | "selectByState"
     | "attachReceipt"
     | "selectGrant"
     | "insertGrant"
@@ -189,20 +225,33 @@ export class SqliteAuthorityStore implements AuthorityStore {
       selectInvocation: prepare("SELECT * FROM invocations WHERE invocation_id = ?"),
       insertInvocation: prepare(
         `INSERT INTO invocations (invocation_id, fingerprint, issuer, grant_id, agent, request_json, amount_atomic,
-           state, reason_codes_json, decided_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           state, reason_codes_json, payment_requirement_json, decided_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
+      // Retrying a FAILED invocation starts a fresh attempt: all previous
+      // payment evidence is cleared (it never settled).
       updateInvocationDecision: prepare(
-        `UPDATE invocations SET state = ?, reason_codes_json = ?, request_json = ?, decided_at = ?, state_reason = NULL,
-           updated_at = ? WHERE invocation_id = ? AND state = 'FAILED'`,
+        `UPDATE invocations SET state = ?, reason_codes_json = ?, request_json = ?, amount_atomic = ?,
+           payment_requirement_json = ?, payment_attempt_json = NULL, settlement_json = NULL, result_json = NULL,
+           payment_transaction_id = NULL, decided_at = ?, state_reason = NULL, updated_at = ?
+         WHERE invocation_id = ? AND state = 'FAILED'`,
       ),
       updateInvocationState: prepare(
         "UPDATE invocations SET state = ?, state_reason = ?, updated_at = ? WHERE invocation_id = ? AND state = ?",
       ),
       confirmInvocation: prepare(
-        `UPDATE invocations SET state = 'CONFIRMED', payment_transaction_id = ?, updated_at = ?
-         WHERE invocation_id = ? AND state = 'RESERVED'`,
+        `UPDATE invocations SET state = 'CONFIRMED', payment_transaction_id = ?, settlement_json = ?, result_json = ?,
+           updated_at = ? WHERE invocation_id = ? AND state = 'RESERVED'`,
       ),
+      recordAttempt: prepare(
+        `UPDATE invocations SET payment_attempt_json = ?, updated_at = ?
+         WHERE invocation_id = ? AND state = 'RESERVED' AND payment_attempt_json IS NULL`,
+      ),
+      resolveConfirmed: prepare(
+        `UPDATE invocations SET state = 'CONFIRMED', payment_transaction_id = ?, settlement_json = ?, state_reason = ?,
+           updated_at = ? WHERE invocation_id = ? AND state = 'RECONCILIATION_REQUIRED'`,
+      ),
+      selectByState: prepare("SELECT * FROM invocations WHERE state = ? ORDER BY created_at"),
       attachReceipt: prepare(
         `UPDATE invocations SET receipt_json = ?, updated_at = ?
          WHERE invocation_id = ? AND receipt_json IS NULL AND state IN ('DENIED', 'CONFIRMED')`,
@@ -218,7 +267,9 @@ export class SqliteAuthorityStore implements AuthorityStore {
       insertTransition: prepare(
         "INSERT INTO invocation_transitions (invocation_id, from_state, to_state, reason, at) VALUES (?, ?, ?, ?, ?)",
       ),
-      selectReserved: prepare("SELECT invocation_id FROM invocations WHERE state = 'RESERVED' ORDER BY created_at"),
+      selectReserved: prepare(
+        "SELECT invocation_id, payment_attempt_json IS NOT NULL AS has_attempt FROM invocations WHERE state = 'RESERVED' ORDER BY created_at",
+      ),
     };
   }
 
@@ -278,44 +329,73 @@ export class SqliteAuthorityStore implements AuthorityStore {
     });
   }
 
-  async confirm(invocationId: string, payment: { transactionId: string; settledAt: number }): Promise<InvocationRecord> {
-    return this.#transaction(() => {
-      const invocation = this.#requireState(invocationId, "RESERVED", "confirm");
-      const grant = this.#requireGrant(invocation.issuer, invocation.grantId);
-      const amount = BigInt(invocation.amountAtomic);
-      const reserved = BigInt(grant.reservedAtomic);
+  async recordPaymentAttempt(invocationId: string, attempt: PaymentAttempt): Promise<void> {
+    this.#transaction(() => {
+      const invocation = this.#requireState(invocationId, "RESERVED", "record a payment attempt");
 
-      if (reserved < amount) {
-        throw new Error(`Grant ${grant.grantId} reserved total is below invocation ${invocationId}'s reservation.`);
+      if (invocation.paymentAttempt !== null) {
+        throw new InvalidStateTransitionError(invocationId, "RESERVED without a recorded attempt", "record a second payment attempt");
       }
 
       const now = this.#now();
-      this.#statements.updateGrantAmounts.run(
-        (reserved - amount).toString(),
-        (BigInt(grant.consumedAtomic) + amount).toString(),
-        now,
-        grant.issuer,
-        grant.grantId,
+      this.#expectOneChange(this.#statements.recordAttempt.run(JSON.stringify(attempt), now, invocationId), invocationId, "record attempt");
+      this.#recordTransition(invocationId, "RESERVED", "RESERVED", `payment attempt ${attempt.payerSignature}`, now);
+    });
+  }
+
+  async confirm(invocationId: string, payment: ConfirmPayment): Promise<InvocationRecord> {
+    return this.#transaction(() => {
+      const invocation = this.#requireState(invocationId, "RESERVED", "confirm");
+      const now = this.#now();
+      this.#consumeReservation(invocation, now);
+      this.#expectOneChange(
+        this.#statements.confirmInvocation.run(
+          payment.transactionId,
+          payment.settlement === undefined ? null : JSON.stringify(payment.settlement),
+          payment.result === undefined || payment.result === null ? null : JSON.stringify(payment.result),
+          now,
+          invocationId,
+        ),
+        invocationId,
+        "confirm",
       );
-      this.#expectOneChange(this.#statements.confirmInvocation.run(payment.transactionId, now, invocationId), invocationId, "confirm");
       this.#recordTransition(invocationId, "RESERVED", "CONFIRMED", `payment ${payment.transactionId}`, now);
       return this.#requireInvocation(invocationId);
     });
   }
 
+  async resolveReconciliation(invocationId: string, outcome: ReconciliationOutcome): Promise<InvocationRecord> {
+    return this.#transaction(() => {
+      const invocation = this.#requireState(invocationId, "RECONCILIATION_REQUIRED", "resolve reconciliation");
+      const now = this.#now();
+
+      if (outcome.kind === "confirmed") {
+        this.#consumeReservation(invocation, now);
+        const reason = `reconciled: settled in ${outcome.settlement.transactionId}`;
+        this.#expectOneChange(
+          this.#statements.resolveConfirmed.run(outcome.settlement.transactionId, JSON.stringify(outcome.settlement), reason, now, invocationId),
+          invocationId,
+          "resolve as confirmed",
+        );
+        this.#recordTransition(invocationId, "RECONCILIATION_REQUIRED", "CONFIRMED", reason, now);
+      } else {
+        this.#releaseReservation(invocation, now);
+        this.#transitionState(invocationId, "RECONCILIATION_REQUIRED", "FAILED", `reconciled: ${outcome.reason}`, now);
+      }
+
+      return this.#requireInvocation(invocationId);
+    });
+  }
+
+  async listReconciliationRequired(): Promise<InvocationRecord[]> {
+    return (this.#statements.selectByState.all("RECONCILIATION_REQUIRED") as InvocationRow[]).map(toInvocation);
+  }
+
   async fail(invocationId: string, reason: string): Promise<void> {
     this.#transaction(() => {
       const invocation = this.#requireState(invocationId, "RESERVED", "fail");
-      const grant = this.#requireGrant(invocation.issuer, invocation.grantId);
-      const amount = BigInt(invocation.amountAtomic);
-      const reserved = BigInt(grant.reservedAtomic);
-
-      if (reserved < amount) {
-        throw new Error(`Grant ${grant.grantId} reserved total is below invocation ${invocationId}'s reservation.`);
-      }
-
       const now = this.#now();
-      this.#statements.updateGrantAmounts.run((reserved - amount).toString(), grant.consumedAtomic, now, grant.issuer, grant.grantId);
+      this.#releaseReservation(invocation, now);
       this.#transitionState(invocationId, "RESERVED", "FAILED", reason, now);
     });
   }
@@ -349,16 +429,24 @@ export class SqliteAuthorityStore implements AuthorityStore {
     return this.#selectGrant(issuer, grantId);
   }
 
-  async recoverInterruptedInvocations(reason: string): Promise<string[]> {
+  async recoverInterruptedInvocations(reason: string): Promise<RecoveryResult> {
     return this.#transaction(() => {
-      const ids = (this.#statements.selectReserved.all() as Array<{ invocation_id: string }>).map((row) => row.invocation_id);
+      const rows = this.#statements.selectReserved.all() as Array<{ invocation_id: string; has_attempt: number }>;
       const now = this.#now();
+      const result: RecoveryResult = { reconciliationRequired: [], releasedNeverSubmitted: [] };
 
-      for (const invocationId of ids) {
-        this.#transitionState(invocationId, "RESERVED", "RECONCILIATION_REQUIRED", reason, now);
+      for (const row of rows) {
+        if (row.has_attempt) {
+          this.#transitionState(row.invocation_id, "RESERVED", "RECONCILIATION_REQUIRED", reason, now);
+          result.reconciliationRequired.push(row.invocation_id);
+        } else {
+          this.#releaseReservation(this.#requireInvocation(row.invocation_id), now);
+          this.#transitionState(row.invocation_id, "RESERVED", "FAILED", `${reason}; no payment attempt recorded, credential never transmitted`, now);
+          result.releasedNeverSubmitted.push(row.invocation_id);
+        }
       }
 
-      return ids;
+      return result;
     });
   }
 
@@ -377,12 +465,21 @@ export class SqliteAuthorityStore implements AuthorityStore {
       throw new Error(`Authority database schema v${version} is newer than this build supports (v${SQLITE_SCHEMA_VERSION}).`);
     }
 
-    if (version === 0) {
-      this.#transaction(() => {
-        this.#db.exec(SCHEMA_V1);
-        this.#db.exec(`PRAGMA user_version = ${SQLITE_SCHEMA_VERSION}`);
-      });
+    const pending = MIGRATIONS.filter((migration) => migration.version > version);
+
+    if (pending.length === 0) {
+      return;
     }
+
+    // All pending migrations apply atomically; a failure leaves the database
+    // exactly as it was (never partially migrated or reset).
+    this.#transaction(() => {
+      for (const migration of pending) {
+        this.#db.exec(migration.sql);
+      }
+
+      this.#db.exec(`PRAGMA user_version = ${SQLITE_SCHEMA_VERSION}`);
+    });
   }
 
   /**
@@ -434,19 +531,61 @@ export class SqliteAuthorityStore implements AuthorityStore {
         input.amountAtomic,
         state,
         JSON.stringify(reasonCodes),
+        input.paymentRequirement === null ? null : JSON.stringify(input.paymentRequirement),
         input.decidedAt,
         now,
         now,
       );
     } else {
       this.#expectOneChange(
-        this.#statements.updateInvocationDecision.run(state, JSON.stringify(reasonCodes), requestJson, input.decidedAt, now, input.invocationId),
+        this.#statements.updateInvocationDecision.run(
+          state,
+          JSON.stringify(reasonCodes),
+          requestJson,
+          input.amountAtomic,
+          input.paymentRequirement === null ? null : JSON.stringify(input.paymentRequirement),
+          input.decidedAt,
+          now,
+          input.invocationId,
+        ),
         input.invocationId,
         "retry",
       );
     }
 
     this.#recordTransition(input.invocationId, existing?.state ?? null, state, reasonCodes.join(",") || null, now);
+  }
+
+  /** reserved -= amount; consumed += amount (exactly once, inside the caller's transaction). */
+  #consumeReservation(invocation: InvocationRecord, now: number): void {
+    const grant = this.#requireGrant(invocation.issuer, invocation.grantId);
+    const amount = BigInt(invocation.amountAtomic);
+    const reserved = BigInt(grant.reservedAtomic);
+
+    if (reserved < amount) {
+      throw new Error(`Grant ${grant.grantId} reserved total is below invocation ${invocation.invocationId}'s reservation.`);
+    }
+
+    this.#statements.updateGrantAmounts.run(
+      (reserved - amount).toString(),
+      (BigInt(grant.consumedAtomic) + amount).toString(),
+      now,
+      grant.issuer,
+      grant.grantId,
+    );
+  }
+
+  /** reserved -= amount (the payment is known not to have settled). */
+  #releaseReservation(invocation: InvocationRecord, now: number): void {
+    const grant = this.#requireGrant(invocation.issuer, invocation.grantId);
+    const amount = BigInt(invocation.amountAtomic);
+    const reserved = BigInt(grant.reservedAtomic);
+
+    if (reserved < amount) {
+      throw new Error(`Grant ${grant.grantId} reserved total is below invocation ${invocation.invocationId}'s reservation.`);
+    }
+
+    this.#statements.updateGrantAmounts.run((reserved - amount).toString(), grant.consumedAtomic, now, grant.issuer, grant.grantId);
   }
 
   #transitionState(invocationId: string, from: InvocationState, to: InvocationState, reason: string, now: number): void {

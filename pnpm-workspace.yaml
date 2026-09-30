@@ -4,3 +4,10 @@ packages:
 
 allowBuilds:
   esbuild: true
+
+overrides:
+  # @solana/pay-kit declares @solana/kit >=6.5.0 (open-ended) but builds its
+  # transactions with @solana-program/* packages that peer on kit ^6. Pin its
+  # kit to the 6.x line its own playground uses, rather than silently pairing
+  # it with kit 8 on the payment path.
+  "@solana/pay-kit>@solana/kit": "^6.10.0"

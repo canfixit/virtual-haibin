@@ -45,6 +45,7 @@ for (let index = 0; index < input.perWorker; index += 1) {
       },
       amountAtomic: input.amountAtomic,
       decidedAt: 1,
+      paymentRequirement: null,
     },
     (committedAtomic) =>
       BigInt(committedAtomic) + BigInt(input.amountAtomic) <= BigInt(input.maxTotalAtomic)

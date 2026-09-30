@@ -8,14 +8,21 @@ x-app-image: &app-image
   working_dir: /workspace
 
 # Public demo identifiers shared by the mock service (which quotes them) and
-# the agent's simulated human permit issuer (which authorizes them). These are
-# randomly generated placeholder addresses with no key material behind them --
-# not secrets, not real USDC, and never mainnet. Phase 4 replaces them with a
-# real devnet demo mint and recipient.
+# the agent's simulated human permit issuer (which authorizes them). Not
+# secrets.
+#   network   -- Virtual Haibin settlement profile name (not a chain id)
+#   mint      -- mainnet USDC mint address *as cloned into the Pay.sh Solana
+#                Payment Sandbox*; sandbox tokens have no real value
+#   recipient -- random placeholder address with no key behind it
 x-demo-payment-config: &demo-payment-config
-  VH_DEMO_NETWORK: "devnet"
-  VH_DEMO_MINT: "5XKfFXQUgrLT2CkDB84rAQMEzPhsJUpHk5TDLiCShpFV"
+  VH_DEMO_NETWORK: "solana-payment-sandbox"
+  VH_DEMO_MINT: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
   VH_DEMO_SERVICE_RECIPIENT: "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb"
+
+# Pay.sh Solana Payment Sandbox (hosted Surfpool test validator; no real
+# funds). Trusted configuration: only the authority and the mock merchant use
+# it; the agent and web never see or choose an RPC.
+x-sandbox-rpc: &sandbox-rpc "https://402.surfnet.dev:8899"
 
 x-dev-volumes: &dev-volumes
   - .:/workspace
@@ -37,6 +44,7 @@ services:
     environment:
       <<: *demo-payment-config
       SERVICE_AGENT_PORT: "4001"
+      SANDBOX_RPC_URL: *sandbox-rpc
       # Demo-only fault injection: the address the mock service quotes when
       # asked for the wrong-recipient scenario (semantic DENY, demo Case 3).
       VH_DEMO_WRONG_RECIPIENT: "DS2xXiLQwn48Laj3XYvCMETqUGXsjBUcXRFTP6G3NYVr"
@@ -65,6 +73,10 @@ services:
       AUTHORITY_AUDIENCE: "virtual-haibin-authority-dev"
       # Durable budget/invocation state (SQLite) on the authority-only volume below.
       AUTHORITY_DB_PATH: "/data/authority.db"
+      # Trusted settlement profile RPC and the only paid URL the authority
+      # will ever call (never agent/service supplied).
+      SANDBOX_RPC_URL: *sandbox-rpc
+      PAID_SERVICE_RESEARCH_URL: "http://service-agent:4001/api/v1/research"
       # Dev-only shared bearer token authenticating agent -> authority HTTP
       # calls. Supplied at runtime from the gitignored .env file (see
       # .env.example); never commit a value here.

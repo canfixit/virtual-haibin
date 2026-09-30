@@ -10,8 +10,14 @@ import {
   type SignedPurchasePermitV1,
   type UnsignedPurchasePermitV1,
 } from "@virtual-haibin/mandate";
-import type { PaymentProvider, PaymentReceipt, PaymentRequest } from "@virtual-haibin/payments";
+import {
+  MockPaymentProvider,
+  type MockChallengeTerms,
+  type PaidResource,
+  type SettlementProfile,
+} from "@virtual-haibin/payments";
 import type { AuthorityService, AuthorizeRequestInput } from "./authorize.js";
+import { createPaidServiceRegistry } from "./payment-challenge.js";
 
 // Test-only fixtures. All keys are generated per test run; none are persisted.
 
@@ -30,22 +36,71 @@ export const mintAddress = await getAddressFromPublicKey((await generateKeyPair(
 export const recipientAddress = await getAddressFromPublicKey((await generateKeyPair()).publicKey);
 export const otherRecipientAddress = await getAddressFromPublicKey((await generateKeyPair()).publicKey);
 
-export class CountingPaymentProvider implements PaymentProvider {
-  calls: PaymentRequest[] = [];
+/** Challenge network the test sandbox profile accepts. */
+export const TEST_CHALLENGE_NETWORK = "solana:test-sandbox";
 
-  async pay(request: PaymentRequest): Promise<PaymentReceipt> {
-    this.calls.push(request);
-    return { ...request, transactionId: `mock-${this.calls.length}`, status: "simulated", settledAt: Date.now() };
+export const TEST_PROFILE: SettlementProfile = Object.freeze({
+  name: "solana-payment-sandbox",
+  permitNetwork: "solana-payment-sandbox",
+  environment: "sandbox",
+  rpcUrl: "http://127.0.0.1:9/never-called",
+  acceptedChallengeNetworks: [TEST_CHALLENGE_NETWORK],
+  allowedAssets: [{ mint: mintAddress, label: "test sandbox token" }],
+  protocol: "x402",
+  x402Version: 2,
+  scheme: "exact",
+  requiredBlockhashPrefix: "SURFNET",
+} satisfies SettlementProfile);
+
+export const TEST_RESOURCE: PaidResource = {
+  serviceId: "mock-research-agent",
+  capability: "research.summary",
+  url: "http://paid.test/api/v1/research",
+  method: "GET",
+};
+
+/** Paid-service registry + settlement profiles for AuthorityService options. */
+export const TEST_PAYMENT_CONFIG = {
+  paidServices: createPaidServiceRegistry([TEST_RESOURCE]),
+  settlementProfiles: new Map([[TEST_PROFILE.permitNetwork, TEST_PROFILE]]),
+};
+
+/**
+ * The honest mock merchant quotes, per invocation, exactly the amount the
+ * test's signed request uses (recorded by signedInput), to the permit's
+ * recipient, in the permit's mint. Tests make it misbehave with `terms`.
+ */
+const quotedAmounts = new Map<string, string>();
+
+export type CountingPaymentProviderOptions = {
+  /** Override challenge terms (all invocations), e.g. a wrong payTo. */
+  terms?: Partial<MockChallengeTerms>;
+};
+
+/** MockPaymentProvider with honest defaults; `calls` = payment executions (signer invocations). */
+export class CountingPaymentProvider extends MockPaymentProvider {
+  constructor(options: CountingPaymentProviderOptions & { behavior?: MockPaymentProvider["behavior"] } = {}) {
+    super({
+      ...(options.behavior === undefined ? {} : { behavior: options.behavior }),
+      challenge: (_resource, reference) => ({
+        network: TEST_CHALLENGE_NETWORK,
+        asset: mintAddress,
+        payTo: recipientAddress,
+        amountAtomic: quotedAmounts.get(reference) ?? "10000",
+        ...options.terms,
+      }),
+    });
+  }
+
+  get calls() {
+    return this.executions;
   }
 }
 
-/** Simulates a provider whose submission outcome is unknown (e.g. RPC timeout after send). */
-export class TimingOutPaymentProvider implements PaymentProvider {
-  calls: PaymentRequest[] = [];
-
-  async pay(request: PaymentRequest): Promise<PaymentReceipt> {
-    this.calls.push(request);
-    throw new Error("simulated RPC timeout after submission");
+/** Transmits, then the outcome is unknown (e.g. timeout after the paid retry was sent). */
+export class TimingOutPaymentProvider extends CountingPaymentProvider {
+  constructor(options: CountingPaymentProviderOptions = {}) {
+    super({ ...options, behavior: "unknown" });
   }
 }
 
@@ -60,7 +115,7 @@ export function buildUnsignedPermit(overrides: Partial<UnsignedPurchasePermitV1>
     authorizedAgent: agentAddress,
     service: "mock-research-agent",
     capability: "research.summary",
-    network: "devnet",
+    network: "solana-payment-sandbox",
     mint: mintAddress,
     recipient: recipientAddress,
     maxPerCallAtomic: "20000",
@@ -105,6 +160,7 @@ export async function signedInput(permit: SignedPurchasePermitV1, options: Signe
   };
 
   const agentSignature = await signAuthorizationRequest(authorizationRequest, options.agent ?? agentIdentity);
+  quotedAmounts.set(authorizationRequest.invocationId, authorizationRequest.amountAtomic);
   return { permit, authorizationRequest, agentSignature };
 }
 

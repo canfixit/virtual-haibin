@@ -9,16 +9,15 @@ type DemoState =
   | { status: "done"; label: string; response: unknown }
   | { status: "error"; label: string; message: string };
 
-type DemoScenario = "honest" | "wrong-recipient";
+type DemoScenario = "honest" | "overcharge" | "wrong-recipient" | "wrong-asset";
 
-/** amountAtomic is an integer string in the demo token's atomic units (6 decimals). */
-async function executeDemo(amountAtomic: string, scenario: DemoScenario): Promise<unknown> {
+async function executeDemo(scenario: DemoScenario): Promise<unknown> {
   const response = await fetch(`${agentApiUrl}/demo`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify({ amountAtomic, scenario }),
+    body: JSON.stringify({ scenario }),
   });
 
   const payload = (await response.json()) as unknown;
@@ -33,11 +32,11 @@ async function executeDemo(amountAtomic: string, scenario: DemoScenario): Promis
 export function App() {
   const [state, setState] = useState<DemoState>({ status: "idle" });
 
-  const run = async (label: string, amountAtomic: string, scenario: DemoScenario = "honest") => {
+  const run = async (label: string, scenario: DemoScenario) => {
     setState({ status: "loading", label });
 
     try {
-      const response = await executeDemo(amountAtomic, scenario);
+      const response = await executeDemo(scenario);
       setState({ status: "done", label, response });
     } catch (error) {
       setState({
@@ -62,33 +61,42 @@ export function App() {
       <section className="panel">
         <h2>Development vertical slice</h2>
         <p>
-          The signed demo permit authorizes research and caps each
-          transaction at 20000 atomic units (0.02 of a 6-decimal demo token)
-          with a total budget of 50000 (0.05). The demo token is a
-          placeholder devnet-style mint, not real USDC.
+          The signed demo permit authorizes the research service to be paid
+          at most 20000 base units per call (0.02) and 50000 in total (0.05)
+          of sandbox USDC on the Pay.sh Solana Payment Sandbox (a hosted test
+          validator; no real funds). The authority fetches the service's real
+          x402 402 challenge, validates it against the permit, and only then
+          settles on the sandbox.
         </p>
 
         <div className="actions">
           <button
             type="button"
             disabled={state.status === "loading"}
-            onClick={() => void run("Allowed request (10000)", "10000")}
+            onClick={() => void run("Allowed paid request (0.01)", "honest")}
           >
             Run allowed request
           </button>
           <button
             type="button"
             disabled={state.status === "loading"}
-            onClick={() => void run("Denied overspend (100000)", "100000")}
+            onClick={() => void run("Merchant overcharges (challenge asks 0.10)", "overcharge")}
           >
-            Run denied overspend
+            Run overcharged challenge
           </button>
           <button
             type="button"
             disabled={state.status === "loading"}
-            onClick={() => void run("Denied wrong recipient (10000)", "10000", "wrong-recipient")}
+            onClick={() => void run("Merchant redirects payment (wrong payTo)", "wrong-recipient")}
           >
-            Run denied wrong recipient
+            Run wrong recipient
+          </button>
+          <button
+            type="button"
+            disabled={state.status === "loading"}
+            onClick={() => void run("Merchant asks for another asset (USDT)", "wrong-asset")}
+          >
+            Run wrong asset
           </button>
         </div>
       </section>

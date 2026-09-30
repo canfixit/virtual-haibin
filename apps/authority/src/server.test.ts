@@ -14,6 +14,8 @@ import {
   otherAgentIdentity,
   signedInput,
   TEST_AUDIENCE,
+  TEST_PAYMENT_CONFIG,
+  TimingOutPaymentProvider,
 } from "./test-support.js";
 
 const SHARED_SECRET = "test-only-shared-secret";
@@ -23,6 +25,7 @@ async function startServer(paymentProvider: PaymentProvider): Promise<{ server: 
     authoritySigner,
     authorityAddress,
     audience: TEST_AUDIENCE,
+    ...TEST_PAYMENT_CONFIG,
     paymentProvider,
     store: new SqliteAuthorityStore(":memory:"),
     log: () => {},
@@ -179,13 +182,7 @@ test("same invocationId with a different request returns 409 INVOCATION_CONFLICT
 });
 
 test("an uncertain payment returns 409 RECONCILIATION_REQUIRED and a retry does not pay again", async () => {
-  let attempts = 0;
-  const timingOut: PaymentProvider = {
-    async pay() {
-      attempts += 1;
-      throw new Error("simulated RPC timeout after submission");
-    },
-  };
+  const timingOut = new TimingOutPaymentProvider();
   const isolated = await startServer(timingOut);
 
   try {
@@ -198,7 +195,7 @@ test("an uncertain payment returns 409 RECONCILIATION_REQUIRED and a retry does 
       assert.equal(await reasonCodeOf(response), "RECONCILIATION_REQUIRED");
     }
 
-    assert.equal(attempts, 1);
+    assert.equal(timingOut.calls.length, 1);
   } finally {
     await stopServer(isolated.server);
   }
@@ -260,4 +257,31 @@ test("injected accounting fields cannot influence authorization anywhere in the 
   assert.equal(body.decision, "DENY");
   assert.deepEqual(body.receipt.reasonCodes, ["TOTAL_BUDGET_EXCEEDED"]);
   assert.equal(provider.calls.length, callsBefore);
+});
+
+test("there is no raw-transaction signing surface, and transaction bytes cannot ride along", async () => {
+  for (const path of ["/sign-transaction", "/sign", "/transactions"]) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SHARED_SECRET}` },
+      body: JSON.stringify({ transactionBytes: "AQID" }),
+    });
+    assert.equal(response.status, 404, path);
+  }
+
+  const permit = await buildSignedPermit();
+  const input = await signedInput(permit, { invocationId: "inv-rawtx-1" });
+  const callsBefore = provider.calls.length;
+  const withTx = await postAuthorize({ ...input, authorizationRequest: { ...input.authorizationRequest, transaction: "AQID" } });
+  assert.equal(withTx.status, 400);
+  assert.equal(provider.calls.length, callsBefore);
+});
+
+test("POST /reconcile requires the bearer token and returns reconciliation reports", async () => {
+  const unauthenticated = await fetch(`${baseUrl}/reconcile`, { method: "POST" });
+  assert.equal(unauthenticated.status, 401);
+
+  const response = await fetch(`${baseUrl}/reconcile`, { method: "POST", headers: { authorization: `Bearer ${SHARED_SECRET}` } });
+  assert.equal(response.status, 200);
+  assert.ok(Array.isArray(((await response.json()) as { reports: unknown }).reports));
 });

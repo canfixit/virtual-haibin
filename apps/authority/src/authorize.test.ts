@@ -28,6 +28,9 @@ import {
   signedInput,
   tamperRequest,
   TEST_AUDIENCE,
+  TEST_CHALLENGE_NETWORK,
+  TEST_PAYMENT_CONFIG,
+  TEST_RESOURCE,
   TimingOutPaymentProvider,
 } from "./test-support.js";
 
@@ -40,6 +43,7 @@ function createService(
     authoritySigner,
     authorityAddress,
     audience: TEST_AUDIENCE,
+    ...TEST_PAYMENT_CONFIG,
     paymentProvider,
     store: new SqliteAuthorityStore(":memory:"),
     log: (entry) => logs.push(entry),
@@ -70,7 +74,7 @@ test("Case 1 -- ALLOW: an agent-signed, authorized, in-budget request is allowed
   assert.equal(result.receipt.decision, "ALLOW");
   assert.equal(result.replay, false);
   assert.equal(provider.calls.length, 1);
-  assert.equal(result.receipt.paymentTransactionId, "mock-1");
+  assert.equal(result.receipt.paymentTransactionId, "mock-tx-1");
   assert.equal(result.receipt.authority, authorityAddress);
   assert.equal(result.receipt.agent, agentAddress);
   assert.equal(result.receipt.permitDigest, await computePermitDigest(permit));
@@ -172,7 +176,7 @@ test("Case 4 -- concurrent duplicates of one invocation produce exactly one paym
 
   assert.equal(provider.calls.length, 1);
   assert.equal(results.filter((result) => !result.replay).length, 1);
-  assert.ok(results.every((result) => result.receipt.paymentTransactionId === "mock-1"));
+  assert.ok(results.every((result) => result.receipt.paymentTransactionId === "mock-tx-1"));
 });
 
 test("Case 5 -- shared budget: concurrent requests cannot collectively exceed the total budget", async () => {
@@ -417,7 +421,8 @@ test("a conflicting request for a denied invocation is also refused rather than 
 });
 
 test("concurrent requests with one invocationId but different payloads pay at most once", async () => {
-  const provider = new CountingPaymentProvider();
+  // The merchant's real price is 10000; the 15000 request is the conflicting one.
+  const provider = new CountingPaymentProvider({ terms: { amountAtomic: "10000" } });
   const service = createService(provider);
   const permit = await buildSignedPermit();
   const inputs = await Promise.all([
@@ -427,7 +432,9 @@ test("concurrent requests with one invocationId but different payloads pay at mo
 
   const results = await Promise.allSettled(inputs.map((input) => service.authorize(input)));
 
-  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  assert.equal(fulfilled.length, 1);
+  assert.equal(fulfilled[0]?.status === "fulfilled" && fulfilled[0].value.receipt.decision, "ALLOW");
   const rejected = results.find((result) => result.status === "rejected");
   assert.ok(rejected && rejected.reason instanceof InvocationConflictError);
   assert.equal(provider.calls.length, 1);
@@ -449,23 +456,23 @@ test("the same invocationId under a different permit is a conflict", async () =>
 // Payment path and evidence
 // ---------------------------------------------------------------------------
 
-test("the payment is built from the verified permit's authoritative facts, in integer atomic units", async () => {
+test("the payment signer receives exactly the validated challenge requirement, in integer base units", async () => {
   const provider = new CountingPaymentProvider();
   const service = createService(provider);
   const permit = await buildSignedPermit();
 
   await service.authorize(await signedInput(permit, { invocationId: "inv-payment-facts-1" }));
 
-  assert.deepEqual(provider.calls, [
-    {
-      from: authorityAddress,
-      to: permit.recipient,
-      mint: permit.mint,
-      network: permit.network,
-      amountAtomic: "10000",
-      reference: "inv-payment-facts-1",
-    },
-  ]);
+  assert.equal(provider.calls.length, 1);
+  const [execution] = provider.calls;
+  assert.equal(execution?.reference, "inv-payment-facts-1");
+  assert.deepEqual(execution?.resource, TEST_RESOURCE);
+  assert.equal(execution?.requirement.scheme, "exact");
+  assert.equal(execution?.requirement.network, TEST_CHALLENGE_NETWORK);
+  assert.equal(execution?.requirement.asset, permit.mint);
+  assert.equal(execution?.requirement.payTo, permit.recipient);
+  assert.equal(execution?.requirement.amountAtomic, "10000");
+  assert.equal(typeof execution?.requirement.amountAtomic, "string");
 });
 
 test("an uncertain payment outcome blocks retries instead of paying again, and keeps budget reserved", async () => {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { getAddressFromPublicKey } from "@solana/addresses";
 import { generateKeyPair } from "@solana/keys";
-import { PaymentNotSubmittedError, type PaymentProvider, type PaymentReceipt, type PaymentRequest } from "@virtual-haibin/payments";
+import type { PaymentProvider } from "@virtual-haibin/payments";
 import {
   AuthorityService,
   GrantPermitConflictError,
@@ -23,6 +23,7 @@ import {
   otherRecipientAddress,
   signedInput,
   TEST_AUDIENCE,
+  TEST_PAYMENT_CONFIG,
   TimingOutPaymentProvider,
 } from "./test-support.js";
 
@@ -56,6 +57,7 @@ async function startProcess(path: string, paymentProvider: PaymentProvider, stor
     authoritySigner,
     authorityAddress,
     audience: TEST_AUDIENCE,
+    ...TEST_PAYMENT_CONFIG,
     paymentProvider,
     store: store ?? sqliteStore,
     log: () => {},
@@ -159,7 +161,7 @@ test("a crash mid-payment becomes RECONCILIATION_REQUIRED on restart and is neve
   const input = await signedInput(permit, { invocationId: "inv-crash-1", amountAtomic: "20000" });
 
   // First process: the payment call never returns (process "dies" mid-send).
-  const hanging: PaymentProvider = { pay: () => new Promise<PaymentReceipt>(() => {}) };
+  const hanging = new CountingPaymentProvider({ behavior: "hang" });
   const first = await startProcess(path, hanging);
   void first.service.authorize(input).catch(() => {});
   await waitFor(async () => (await first.store.getInvocation("inv-crash-1"))?.state === "RESERVED");
@@ -200,16 +202,8 @@ test("an uncertain payment outcome is still blocked after restart", async () => 
 test("a payment known never to have been submitted releases budget and the same request can retry", async () => {
   const path = tempDbPath();
   const permit = await buildSignedPermit({ maxPerCallAtomic: "20000", maxTotalAtomic: "20000" });
-  let attempts = 0;
-  const flaky: PaymentProvider = {
-    async pay(request: PaymentRequest): Promise<PaymentReceipt> {
-      attempts += 1;
-      if (attempts === 1) {
-        throw new PaymentNotSubmittedError("rejected before send");
-      }
-      return { ...request, transactionId: `mock-${attempts}`, status: "simulated", settledAt: Date.now() };
-    },
-  };
+  // First execution fails before transmission; the retry settles.
+  const flaky = new CountingPaymentProvider({ behavior: "not_submitted" });
 
   const { service } = await startProcess(path, flaky);
 
@@ -218,6 +212,7 @@ test("a payment known never to have been submitted releases budget and the same 
     (error: unknown) => error instanceof PaymentNotSubmittedFailure && error.statusCode === 502,
   );
   assert.equal(await committedAtomic(service, permit), "0");
+  flaky.behavior = "settle";
 
   // A different request under the failed id is a conflict, not a new attempt.
   await assert.rejects(
@@ -227,7 +222,7 @@ test("a payment known never to have been submitted releases budget and the same 
 
   const retry = await service.authorize(await signedInput(permit, { invocationId: "inv-flaky-1", amountAtomic: "20000" }));
   assert.equal(retry.receipt.decision, "ALLOW");
-  assert.equal(retry.receipt.paymentTransactionId, "mock-2");
+  assert.equal(retry.receipt.paymentTransactionId, "mock-tx-2");
   assert.equal(await committedAtomic(service, permit), "20000");
 });
 
@@ -245,6 +240,9 @@ test("if a completed payment cannot be recorded, the invocation is blocked inste
       }
       return sqliteStore.confirm(invocationId, payment);
     },
+    recordPaymentAttempt: (invocationId, attempt) => sqliteStore.recordPaymentAttempt(invocationId, attempt),
+    resolveReconciliation: (invocationId, outcome) => sqliteStore.resolveReconciliation(invocationId, outcome),
+    listReconciliationRequired: () => sqliteStore.listReconciliationRequired(),
     fail: (invocationId, reason) => sqliteStore.fail(invocationId, reason),
     markReconciliationRequired: (invocationId, reason) => sqliteStore.markReconciliationRequired(invocationId, reason),
     attachReceipt: (invocationId, receipt) => sqliteStore.attachReceipt(invocationId, receipt),

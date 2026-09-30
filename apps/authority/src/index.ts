@@ -1,9 +1,10 @@
 import { getAddressFromPublicKey } from "@solana/addresses";
 import { generateKeyPair } from "@solana/keys";
-import { MockPaymentProvider } from "@virtual-haibin/payments";
+import { SANDBOX_USDC_MINT, solanaPaymentSandboxProfile, X402ExactPaymentProvider } from "@virtual-haibin/payments";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { AuthorityService } from "./authorize.js";
+import { createPaidServiceRegistry } from "./payment-challenge.js";
 import { createAuthorityServer } from "./server.js";
 import { SqliteAuthorityStore } from "./store/sqlite-store.js";
 
@@ -16,6 +17,14 @@ const audience = process.env.AUTHORITY_AUDIENCE;
 // Durable budget/invocation state. In Compose this is a named volume, never
 // a path inside the source tree.
 const databasePath = process.env.AUTHORITY_DB_PATH;
+
+// Trusted settlement + paid-service configuration (authority-only env).
+const sandboxRpcUrl = process.env.SANDBOX_RPC_URL;
+const paidResearchUrl = process.env.PAID_SERVICE_RESEARCH_URL;
+
+if (!sandboxRpcUrl || !paidResearchUrl) {
+  throw new Error("SANDBOX_RPC_URL and PAID_SERVICE_RESEARCH_URL are required (see compose.yaml).");
+}
 
 if (!databasePath) {
   throw new Error("AUTHORITY_DB_PATH is required (see compose.yaml).");
@@ -48,6 +57,23 @@ if (!sharedSecret || sharedSecret.length < MIN_SECRET_LENGTH || sharedSecret ===
 const authoritySigner = await generateKeyPair();
 const authorityAddress = await getAddressFromPublicKey(authoritySigner.publicKey);
 
+// Settlement profile: Pay.sh Solana Payment Sandbox (hosted Surfpool test
+// validator; no real funds), pinned to one RPC. See settlement-profile.ts
+// for why the challenge alone cannot distinguish sandbox from mainnet.
+const sandboxProfile = solanaPaymentSandboxProfile(sandboxRpcUrl);
+
+// Payment wallet: a *separate*, ephemeral, sandbox-only key held only by the
+// payment provider (not the receipt key above, not the agent's identity key,
+// not the permit issuer's key). It is never logged or returned.
+const paymentProvider = await X402ExactPaymentProvider.create({ profile: sandboxProfile });
+const { surfnetVersion } = await paymentProvider.assertSandboxEnvironment();
+// 100 sandbox USDC (6-decimal mint) via Surfnet cheatcode; sandbox only.
+await paymentProvider.fundSandboxWallet(SANDBOX_USDC_MINT, 100_000_000n);
+
+const paidServices = createPaidServiceRegistry([
+  { serviceId: "mock-research-agent", capability: "research.summary", url: paidResearchUrl, method: "GET" },
+]);
+
 mkdirSync(dirname(databasePath), { recursive: true });
 const store = new SqliteAuthorityStore(databasePath);
 
@@ -55,13 +81,49 @@ const authorityService = new AuthorityService({
   authoritySigner,
   authorityAddress,
   audience,
-  paymentProvider: new MockPaymentProvider(),
+  paymentProvider,
+  paidServices,
+  settlementProfiles: new Map([[sandboxProfile.permitNetwork, sandboxProfile]]),
   store,
 });
 
 // Before serving: anything a previous process left mid-payment has an
 // unknown outcome and must never be paid again automatically.
 const interrupted = await authorityService.recoverInterruptedInvocations();
+
+// Reconciliation is read-only toward the chain (never pays). Run once now
+// and periodically for invocations whose blockhash had not yet expired.
+let reconciling = false;
+
+async function reconcileOnce(trigger: string): Promise<void> {
+  if (reconciling) {
+    return;
+  }
+
+  reconciling = true;
+
+  try {
+    const reports = await authorityService.reconcile();
+
+    // Log at startup, or when something changed/failed; stay quiet while
+    // invocations are merely still pending.
+    const notable = reports.filter((report) => report.outcome !== "still_pending" && report.outcome !== "no_attempt_recorded");
+
+    if (trigger === "startup" ? reports.length > 0 : notable.length > 0) {
+      console.log(JSON.stringify({ component: "authority", event: "authority.reconciliation_run", trigger, reports }));
+    }
+  } catch (error) {
+    console.error(
+      JSON.stringify({ component: "authority", event: "authority.reconciliation_error", error: error instanceof Error ? error.message : "unknown" }),
+    );
+  } finally {
+    reconciling = false;
+  }
+}
+
+await reconcileOnce("startup");
+const reconcileTimer = setInterval(() => void reconcileOnce("interval"), 15_000);
+reconcileTimer.unref();
 
 const server = createAuthorityServer({ authorityService, authorityAddress, sharedSecret });
 
@@ -73,12 +135,19 @@ server.listen(port, () => {
       port,
       authorityAddress,
       databasePath,
-      recoveredToReconciliation: interrupted.length,
+      recoveredToReconciliation: interrupted.reconciliationRequired.length,
+      releasedNeverSubmitted: interrupted.releasedNeverSubmitted.length,
+      settlementProfile: sandboxProfile.name,
+      environment: "Solana Payment Sandbox (Surfpool; no real funds)",
+      sandboxRpcUrl: sandboxProfile.rpcUrl,
+      surfnetVersion,
+      paymentWallet: paymentProvider.payerAddress,
     }),
   );
 });
 
 function shutdown(signal: string): void {
+  clearInterval(reconcileTimer);
   server.close(() => {
     void store.close().finally(() => {
       console.log(JSON.stringify({ component: "authority", event: "authority.stopped", signal }));
