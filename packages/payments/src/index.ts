@@ -30,3 +30,18 @@ export class MockPaymentProvider implements PaymentProvider {
     };
   }
 }
+
+/**
+ * Thrown by a provider only when it is certain the payment was never
+ * submitted (e.g. rejected during local validation, before any network
+ * send). The authority may then release the reservation and allow a retry.
+ * Any other error -- including timeouts after send -- must be treated as an
+ * unknown outcome that requires reconciliation, never as permission to pay
+ * again.
+ */
+export class PaymentNotSubmittedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PaymentNotSubmittedError";
+  }
+}

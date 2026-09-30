@@ -11,7 +11,7 @@ import {
   type UnsignedPurchasePermitV1,
 } from "@virtual-haibin/mandate";
 import type { PaymentProvider, PaymentReceipt, PaymentRequest } from "@virtual-haibin/payments";
-import type { AuthorizeRequestInput } from "./authorize.js";
+import type { AuthorityService, AuthorizeRequestInput } from "./authorize.js";
 
 // Test-only fixtures. All keys are generated per test run; none are persisted.
 
@@ -111,4 +111,10 @@ export async function signedInput(permit: SignedPurchasePermitV1, options: Signe
 /** Modifies signed request fields *after* signing, as an attacker in transit would. */
 export function tamperRequest(input: AuthorizeRequestInput, fields: Partial<AuthorizationRequestV1>): AuthorizeRequestInput {
   return { ...input, authorizationRequest: { ...input.authorizationRequest, ...fields } };
+}
+
+/** Durable committed (reserved + consumed) total for a permit's grant, as a string. */
+export async function committedAtomic(service: AuthorityService, permit: SignedPurchasePermitV1): Promise<string> {
+  const budget = await service.getGrantBudget(permit.issuer, permit.grantId);
+  return budget === null ? "0" : (BigInt(budget.reservedAtomic) + BigInt(budget.consumedAtomic)).toString();
 }

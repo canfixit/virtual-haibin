@@ -38,3 +38,10 @@ ledger
 Thumbs.db
 .idea
 .vscode
+
+# Authority SQLite state (lives on the authority_data Docker volume; never commit)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3

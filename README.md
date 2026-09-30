@@ -159,13 +159,14 @@ The full request/response JSON (including the authority's signed receipt) is vis
 
 Current mocked/incomplete boundaries include:
 
-- durable budget/replay state -- `apps/authority` tracks per-grant spend and per-invocation replay results only in process memory (see `apps/authority/src/authorize.ts`); this is enough to demonstrate atomic concurrent-request budget enforcement and replay idempotency, but it does not survive a restart
+- durable state is single-node SQLite -- grant budgets (reserved/consumed), invocation ids, fingerprints, states and stored receipts live in `/data/authority.db` on the `authority_data` Docker volume (`apps/authority/src/store/`), behind an `AuthorityStore` interface; they survive process and container restarts, but there is no replication/backup, and startup recovery assumes a single authority process
+- the authority's receipt-signing key is still ephemeral per process: receipts stored before a restart remain verifiable against the authority address they name, but the authority's identity changes on every restart
 - real Solana settlement -- payment is still `MockPaymentProvider` (`packages/payments`); no devnet transaction exists yet
 - service-side payment verification -- `apps/service-agent`'s `/execute` still trusts an arbitrary `x-payment-reference` header
 - independently verifiable evidence receipts -- the authority signs a decision receipt (`apps/authority/src/receipt.ts`) proving *it* made the decision, but this is not yet the full Phase 6 evidence bundle (no Solana settlement or service-result linkage yet), and there is no independent verifier tool
 - agent identity is ephemeral: the agent generates a fresh, non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds), and the demo permit is issued to that identity at startup by a simulated human issuer running in the same process; persistent agent identity storage and out-of-process permit issuance are future work
 - agent-to-authority transport authentication is a shared dev-only bearer secret (`AUTHORITY_SHARED_SECRET`, supplied at runtime from the gitignored `.env`); it is **not** treated as proof of agent identity -- every `/authorize` call must carry the agent's signature over a domain-separated request bound to the exact permit (SHA-256 digest), the authority audience, the invocation and all payment fields, verified against the permit's `authorizedAgent`
-- a payment attempt whose outcome is unknown blocks that invocation with `RECONCILIATION_REQUIRED` (HTTP 409) and keeps its budget reserved, but that state is in memory only and there is no reconciliation procedure yet
+- a payment attempt whose outcome is unknown -- provider error/timeout, a payment that could not be recorded, or an authority restart mid-payment -- durably blocks that invocation as `RECONCILIATION_REQUIRED` (HTTP 409) with its budget still reserved; there is no reconciliation procedure yet to resolve it (that needs real settlement, Phase 4)
 
 The next implementation work replaces these boundaries incrementally.
 
@@ -281,6 +282,8 @@ To remove dependency volumes as well:
 ```bash
 docker compose down -v
 ```
+
+`down -v` also deletes the `authority_data` volume, i.e. **all durable authority state** (budgets, invocation history, receipts). Use plain `docker compose down` to keep it.
 
 ### Validate inside Docker
 

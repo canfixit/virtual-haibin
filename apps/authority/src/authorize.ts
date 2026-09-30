@@ -7,15 +7,15 @@ import {
   type AuthorizationRequestV1,
   type SignedPurchasePermitV1,
 } from "@virtual-haibin/mandate";
-import type { PaymentProvider } from "@virtual-haibin/payments";
+import { PaymentNotSubmittedError, type PaymentProvider } from "@virtual-haibin/payments";
 import { evaluatePurchasePermit } from "@virtual-haibin/policy";
 import {
   AUTHORIZATION_RECEIPT_DOMAIN,
   AUTHORIZATION_RECEIPT_VERSION,
   signAuthorizationReceipt,
   type SignedAuthorizationReceiptV1,
-  type UnsignedAuthorizationReceiptV1,
 } from "./receipt.js";
+import type { AuthorityStore, BudgetDecision, InvocationRecord } from "./store/types.js";
 
 export type AuthorizeRequestInput = {
   /** Untrusted; verified with verifyPurchasePermit. */
@@ -32,6 +32,13 @@ export type AuthorizeResult = {
   replay: boolean;
 };
 
+export type GrantBudget = {
+  maxTotalAtomic: string;
+  reservedAtomic: string;
+  consumedAtomic: string;
+  remainingAtomic: string;
+};
+
 export type AuthorityLogEntry = { event: string } & Record<string, unknown>;
 
 export type AuthorityServiceOptions = {
@@ -40,6 +47,8 @@ export type AuthorityServiceOptions = {
   /** This authority's audience identifier; requests addressed elsewhere are rejected. */
   audience: string;
   paymentProvider: PaymentProvider;
+  /** Durable, authoritative budget and invocation state. */
+  store: AuthorityStore;
   auditLog?: InMemoryAuditLog;
   /** Structured log sink. Receives identifiers and decisions only, never key material. */
   log?: (entry: AuthorityLogEntry) => void;
@@ -60,6 +69,9 @@ export type AuthorityReasonCode =
   | "REQUEST_PERMIT_DIGEST_MISMATCH"
   | "REQUEST_TIMESTAMP_OUT_OF_RANGE"
   | "INVOCATION_CONFLICT"
+  | "INVOCATION_IN_PROGRESS"
+  | "GRANT_PERMIT_CONFLICT"
+  | "PAYMENT_NOT_SUBMITTED"
   | "RECONCILIATION_REQUIRED";
 
 /** A request the authority refused before (or instead of) producing a decision receipt. */
@@ -100,12 +112,47 @@ export class InvocationConflictError extends AuthorityRequestError {
 }
 
 /**
+ * The same request is RESERVED but not being processed by this process
+ * (e.g. another authority process holds it). The caller should retry later;
+ * nothing is paid by this call.
+ */
+export class InvocationInProgressError extends AuthorityRequestError {
+  constructor(readonly invocationId: string) {
+    super(409, "INVOCATION_IN_PROGRESS", `Invocation ${invocationId} is already being processed.`, { invocationId });
+  }
+}
+
+/**
+ * The grant (issuer + grantId) is already bound to a different permit.
+ * Issuers must use a fresh grantId for new terms, so budgets of different
+ * permits can never be mixed.
+ */
+export class GrantPermitConflictError extends AuthorityRequestError {
+  constructor(grantId: string) {
+    super(409, "GRANT_PERMIT_CONFLICT", `Grant ${grantId} is already bound to a different permit.`, { grantId });
+  }
+}
+
+/**
+ * The payment provider reported that the payment was definitely never
+ * submitted. The reservation was released and the same request may be
+ * retried with the same invocationId.
+ */
+export class PaymentNotSubmittedFailure extends AuthorityRequestError {
+  constructor(readonly invocationId: string) {
+    super(502, "PAYMENT_NOT_SUBMITTED", `Payment for invocation ${invocationId} was not submitted; it may be retried.`, {
+      invocationId,
+    });
+  }
+}
+
+/**
  * Thrown when a payment for this invocation was attempted but its outcome is
- * unknown (the provider threw, or the receipt could not be produced after
- * paying). Retrying must not pay again -- a timeout is not permission to
- * re-submit (CLAUDE.md security invariants 12/13). The invocation stays
- * blocked, and its budget stays reserved, until it is reconciled; durable
- * reconciliation lands with Phase 3/4.
+ * unknown (the provider threw, the process crashed mid-payment, or the
+ * result could not be recorded). Retrying must not pay again -- a timeout
+ * is not permission to re-submit (CLAUDE.md security invariants 12/13). The
+ * invocation stays blocked, and its budget stays reserved, in durable state
+ * until it is reconciled.
  */
 export class ReconciliationRequiredError extends AuthorityRequestError {
   constructor(readonly invocationId: string) {
@@ -123,11 +170,6 @@ type AuthenticatedRequest = {
   request: AuthorizationRequestV1;
   fingerprint: string;
 };
-
-type InvocationRecord =
-  | { state: "in_flight"; fingerprint: string; promise: Promise<SignedAuthorizationReceiptV1> }
-  | { state: "decided"; fingerprint: string; receipt: SignedAuthorizationReceiptV1 }
-  | { state: "reconciliation_required"; fingerprint: string };
 
 function defaultLog(entry: AuthorityLogEntry): void {
   console.log(JSON.stringify({ component: "authority", ...entry }));
@@ -170,32 +212,33 @@ async function computeRequestFingerprint(permit: SignedPurchasePermitV1, request
  * Authenticates, decides and (on ALLOW) pays out purchase requests against
  * signed permits.
  *
- * State here (per-grant spend, per-invocation records) lives only in this
- * process's memory. That's a deliberate, documented Phase 2 limitation: it
- * demonstrates atomic-within-a-process budget reservation and idempotent
- * invocation handling, but does not survive a restart and does not
- * coordinate across authority processes. Phase 3 replaces it with durable,
- * atomically-reserved storage.
+ * All security-critical state -- grant budgets, reservations, invocation
+ * ids/fingerprints/states and receipts -- lives in the injected
+ * AuthorityStore, which is the source of truth and survives restarts. The
+ * only in-process state is `#pending`, a non-authoritative map that lets
+ * concurrent duplicates within this process wait for the first request's
+ * outcome instead of receiving INVOCATION_IN_PROGRESS.
  */
 export class AuthorityService {
   readonly #authoritySigner: CryptoKeyPair;
   readonly #authorityAddress: string;
   readonly #audience: string;
   readonly #paymentProvider: PaymentProvider;
+  readonly #store: AuthorityStore;
   readonly #auditLog: InMemoryAuditLog;
   readonly #log: (entry: AuthorityLogEntry) => void;
   readonly #now: () => number;
   readonly #maxRequestAgeMs: number;
   readonly #maxFutureSkewMs: number;
 
-  readonly #grantSpentAtomic = new Map<string, bigint>();
-  readonly #invocations = new Map<string, InvocationRecord>();
+  readonly #pending = new Map<string, { fingerprint: string; promise: Promise<AuthorizeResult> }>();
 
   constructor(options: AuthorityServiceOptions) {
     this.#authoritySigner = options.authoritySigner;
     this.#authorityAddress = options.authorityAddress;
     this.#audience = options.audience;
     this.#paymentProvider = options.paymentProvider;
+    this.#store = options.store;
     this.#auditLog = options.auditLog ?? new InMemoryAuditLog();
     this.#log = options.log ?? defaultLog;
     this.#now = options.now ?? Date.now;
@@ -207,9 +250,37 @@ export class AuthorityService {
     return this.#auditLog;
   }
 
-  /** Atomic units spent or reserved under a grant in this process (read-only view). */
-  getGrantSpentAtomic(grantId: string): string {
-    return (this.#grantSpentAtomic.get(grantId) ?? 0n).toString();
+  /** Durable budget view for a grant, or null if the grant has never been used. */
+  async getGrantBudget(issuer: string, grantId: string): Promise<GrantBudget | null> {
+    const grant = await this.#store.getGrant(issuer, grantId);
+
+    if (grant === null) {
+      return null;
+    }
+
+    const committed = BigInt(grant.reservedAtomic) + BigInt(grant.consumedAtomic);
+    return {
+      maxTotalAtomic: grant.maxTotalAtomic,
+      reservedAtomic: grant.reservedAtomic,
+      consumedAtomic: grant.consumedAtomic,
+      remainingAtomic: (BigInt(grant.maxTotalAtomic) - committed).toString(),
+    };
+  }
+
+  /**
+   * Startup recovery: invocations left RESERVED by a previous process may
+   * or may not have been paid, so they become RECONCILIATION_REQUIRED and
+   * are never paid again automatically. Assumes this is the only authority
+   * process using the store.
+   */
+  async recoverInterruptedInvocations(): Promise<string[]> {
+    const ids = await this.#store.recoverInterruptedInvocations("authority restarted while payment was in progress");
+
+    for (const invocationId of ids) {
+      this.#log({ event: "authority.reconciliation_required", invocationId, cause: "interrupted_by_restart" });
+    }
+
+    return ids;
   }
 
   async authorize(input: AuthorizeRequestInput): Promise<AuthorizeResult> {
@@ -217,43 +288,29 @@ export class AuthorityService {
     const { invocationId } = authenticated.request;
     const { fingerprint } = authenticated;
 
-    // From here to `set` below there is no `await`, so claiming the
-    // invocationId is atomic with respect to concurrent requests.
-    const existing = this.#invocations.get(invocationId);
+    // From here to `set` there is no `await`: concurrent duplicates in this
+    // process attach to the first request instead of racing it. Durable
+    // uniqueness across processes/restarts is enforced by the store.
+    const pending = this.#pending.get(invocationId);
 
-    if (existing) {
-      if (existing.fingerprint !== fingerprint) {
+    if (pending) {
+      if (pending.fingerprint !== fingerprint) {
         this.#log({ event: "authority.invocation_conflict", invocationId, grantId: authenticated.permit.grantId });
         throw new InvocationConflictError(invocationId);
       }
 
-      if (existing.state === "reconciliation_required") {
-        this.#log({ event: "authority.reconciliation_blocked", invocationId });
-        throw new ReconciliationRequiredError(invocationId);
-      }
-
-      const receipt = existing.state === "decided" ? existing.receipt : await existing.promise;
+      const { receipt } = await pending.promise;
       this.#log({ event: "authority.replay", invocationId, grantId: receipt.grantId, decision: receipt.decision });
       return { receipt, replay: true };
     }
 
-    const promise = this.#decide(authenticated);
-    this.#invocations.set(invocationId, { state: "in_flight", fingerprint, promise });
+    const promise = this.#process(authenticated);
+    this.#pending.set(invocationId, { fingerprint, promise });
 
     try {
-      const receipt = await promise;
-      this.#invocations.set(invocationId, { state: "decided", fingerprint, receipt });
-      return { receipt, replay: false };
-    } catch (error) {
-      if (error instanceof ReconciliationRequiredError) {
-        this.#invocations.set(invocationId, { state: "reconciliation_required", fingerprint });
-      } else {
-        // Failed before any payment attempt (reservation happens only
-        // immediately before paying), so the invocation may be retried.
-        this.#invocations.delete(invocationId);
-      }
-
-      throw error;
+      return await promise;
+    } finally {
+      this.#pending.delete(invocationId);
     }
   }
 
@@ -314,55 +371,120 @@ export class AuthorityService {
     return { permit, request, fingerprint: await computeRequestFingerprint(permit, request) };
   }
 
-  async #decide({ permit, request, fingerprint }: AuthenticatedRequest): Promise<SignedAuthorizationReceiptV1> {
-    const currentSpentAtomic = this.#grantSpentAtomic.get(permit.grantId) ?? 0n;
+  async #process({ permit, request, fingerprint }: AuthenticatedRequest): Promise<AuthorizeResult> {
+    const decidedAt = this.#now();
 
-    const decision = evaluatePurchasePermit(permit, {
-      service: request.service,
-      capability: request.capability,
-      network: request.network,
-      mint: request.mint,
-      recipient: request.recipient,
-      amountAtomic: request.amountAtomic,
-      alreadySpentAtomic: currentSpentAtomic.toString(),
-      now: this.#now(),
-    });
-
-    this.#auditLog.append({
-      type: "policy.decision",
-      actor: permit.authorizedAgent,
-      mandateId: permit.grantId,
-      data: {
-        allowed: decision.allowed,
-        reasonCodes: decision.reasonCodes,
-        invocationId: request.invocationId,
+    // The policy runs *inside* the store transaction against the durable
+    // committed total, so the budget check and the reservation are atomic.
+    const evaluate = (committedAtomic: string): BudgetDecision => {
+      const decision = evaluatePurchasePermit(permit, {
+        service: request.service,
+        capability: request.capability,
+        network: request.network,
+        mint: request.mint,
+        recipient: request.recipient,
         amountAtomic: request.amountAtomic,
-      },
-    });
+        alreadySpentAtomic: committedAtomic,
+        now: decidedAt,
+      });
 
-    if (!decision.allowed) {
-      return this.#recordDenial(permit, request, fingerprint, decision.reasonCodes);
+      return decision.allowed ? { allowed: true } : { allowed: false, reasonCodes: decision.reasonCodes };
+    };
+
+    const result = await this.#store.reserve(
+      {
+        invocationId: request.invocationId,
+        fingerprint,
+        grant: {
+          issuer: permit.issuer,
+          grantId: permit.grantId,
+          permitDigest: request.permitDigest,
+          maxTotalAtomic: permit.maxTotalAtomic,
+        },
+        agent: permit.authorizedAgent,
+        request,
+        amountAtomic: request.amountAtomic,
+        decidedAt,
+      },
+      evaluate,
+    );
+
+    switch (result.kind) {
+      case "grant_conflict":
+        this.#log({ event: "authority.grant_conflict", invocationId: request.invocationId, grantId: permit.grantId });
+        throw new GrantPermitConflictError(permit.grantId);
+
+      case "existing":
+        return this.#resolveExisting(result.invocation, fingerprint);
+
+      case "denied": {
+        this.#auditDecision(permit, result.invocation);
+        this.#log({
+          event: "authority.denied",
+          invocationId: request.invocationId,
+          grantId: permit.grantId,
+          agent: permit.authorizedAgent,
+          serviceId: request.service,
+          decision: "DENY",
+          reasonCodes: result.invocation.reasonCodes,
+        });
+        return { receipt: await this.#ensureReceipt(result.invocation), replay: false };
+      }
+
+      case "reserved":
+        this.#auditDecision(permit, result.invocation);
+        return { receipt: await this.#pay(permit, result.invocation), replay: false };
+    }
+  }
+
+  async #resolveExisting(invocation: InvocationRecord, fingerprint: string): Promise<AuthorizeResult> {
+    const { invocationId } = invocation;
+
+    if (invocation.fingerprint !== fingerprint) {
+      this.#log({ event: "authority.invocation_conflict", invocationId, grantId: invocation.grantId });
+      throw new InvocationConflictError(invocationId);
     }
 
-    // Reserve budget with no `await` between reading currentSpentAtomic and
-    // writing the new total, so a concurrent authorize() call for the same
-    // grantId cannot observe a stale value -- this is what keeps a burst of
-    // concurrent requests from collectively exceeding maxTotalAtomic within
-    // this process (demo Case 5).
-    const amountAtomic = BigInt(request.amountAtomic);
-    const spentAfterReservation = currentSpentAtomic + amountAtomic;
-    this.#grantSpentAtomic.set(permit.grantId, spentAfterReservation);
+    switch (invocation.state) {
+      case "DENIED":
+      case "CONFIRMED": {
+        const receipt = await this.#ensureReceipt(invocation);
+        this.#log({ event: "authority.replay", invocationId, grantId: invocation.grantId, decision: receipt.decision });
+        return { receipt, replay: true };
+      }
+
+      case "RECONCILIATION_REQUIRED":
+        this.#log({ event: "authority.reconciliation_blocked", invocationId });
+        throw new ReconciliationRequiredError(invocationId);
+
+      case "RESERVED":
+        this.#log({ event: "authority.in_progress", invocationId });
+        throw new InvocationInProgressError(invocationId);
+
+      case "FAILED":
+        // The store retries a FAILED invocation with the same fingerprint
+        // itself, so it is never returned as "existing" here.
+        throw new Error(`Unexpected FAILED invocation ${invocationId} returned by store.`);
+    }
+  }
+
+  async #pay(permit: SignedPurchasePermitV1, invocation: InvocationRecord): Promise<SignedAuthorizationReceiptV1> {
+    const { invocationId } = invocation;
+    const budget = await this.getGrantBudget(permit.issuer, permit.grantId);
 
     this.#log({
       event: "authority.reserved",
-      invocationId: request.invocationId,
+      invocationId,
       grantId: permit.grantId,
       agent: permit.authorizedAgent,
       serviceId: permit.service,
       decision: "ALLOW",
-      reservedAtomic: amountAtomic.toString(),
-      remainingAtomic: (BigInt(permit.maxTotalAtomic) - spentAfterReservation).toString(),
+      reservedAtomic: invocation.amountAtomic,
+      remainingAtomic: budget?.remainingAtomic,
     });
+
+    let transactionId: string;
+    let settledAt: number;
 
     try {
       // Payment facts come from the verified permit, not the caller's request
@@ -373,108 +495,101 @@ export class AuthorityService {
         to: permit.recipient,
         mint: permit.mint,
         network: permit.network,
-        amountAtomic: amountAtomic.toString(),
-        reference: request.invocationId,
+        amountAtomic: invocation.amountAtomic,
+        reference: invocationId,
       });
 
-      this.#auditLog.append({
-        type: "payment.completed",
-        actor: this.#authorityAddress,
-        mandateId: permit.grantId,
-        data: payment,
-      });
-
-      const receipt = await signAuthorizationReceipt(
-        {
-          ...this.#receiptBase(permit, request, fingerprint),
-          service: permit.service,
-          capability: permit.capability,
-          network: permit.network,
-          mint: permit.mint,
-          recipient: permit.recipient,
-          amountAtomic: amountAtomic.toString(),
-          decision: "ALLOW",
-          reasonCodes: [],
-          paymentTransactionId: payment.transactionId,
-        },
-        this.#authoritySigner,
-      );
-
-      this.#log({
-        event: "authority.paid",
-        invocationId: request.invocationId,
-        grantId: permit.grantId,
-        transactionId: payment.transactionId,
-        settlement: payment.status,
-      });
-
-      return receipt;
+      transactionId = payment.transactionId;
+      settledAt = payment.settledAt;
+      this.#auditLog.append({ type: "payment.completed", actor: this.#authorityAddress, mandateId: permit.grantId, data: payment });
     } catch (error) {
-      // A payment may or may not have been submitted. Block this invocation
-      // and keep its budget reserved rather than risk paying twice.
-      this.#log({
-        event: "authority.reconciliation_required",
-        invocationId: request.invocationId,
-        grantId: permit.grantId,
-        error: error instanceof Error ? error.message : "unknown",
-      });
-      throw new ReconciliationRequiredError(request.invocationId);
+      const message = error instanceof Error ? error.message : "unknown";
+
+      if (error instanceof PaymentNotSubmittedError) {
+        // Known never submitted: release the reservation; same request may retry.
+        await this.#store.fail(invocationId, message);
+        this.#log({ event: "authority.payment_not_submitted", invocationId, grantId: permit.grantId, error: message });
+        throw new PaymentNotSubmittedFailure(invocationId);
+      }
+
+      // A payment may or may not have been submitted. Keep the reservation
+      // and block the invocation rather than risk paying twice.
+      await this.#store.markReconciliationRequired(invocationId, message);
+      this.#log({ event: "authority.reconciliation_required", invocationId, grantId: permit.grantId, error: message });
+      throw new ReconciliationRequiredError(invocationId);
     }
+
+    let confirmed: InvocationRecord;
+
+    try {
+      confirmed = await this.#store.confirm(invocationId, { transactionId, settledAt });
+    } catch (error) {
+      // Paid, but the payment could not be recorded: never pay this again.
+      const message = error instanceof Error ? error.message : "unknown";
+      this.#log({ event: "authority.reconciliation_required", invocationId, transactionId, error: message });
+      await this.#store.markReconciliationRequired(invocationId, `payment ${transactionId} not recorded: ${message}`).catch(() => {
+        // The row stays RESERVED, which startup recovery also treats as unknown.
+      });
+      throw new ReconciliationRequiredError(invocationId);
+    }
+
+    this.#log({ event: "authority.paid", invocationId, grantId: permit.grantId, transactionId, settlement: "simulated" });
+    return this.#ensureReceipt(confirmed);
   }
 
-  #receiptBase(
-    permit: SignedPurchasePermitV1,
-    request: AuthorizationRequestV1,
-    fingerprint: string,
-  ): Pick<
-    UnsignedAuthorizationReceiptV1,
-    "version" | "domain" | "invocationId" | "grantId" | "authority" | "agent" | "permitDigest" | "requestFingerprint" | "decidedAt"
-  > {
-    return {
-      version: AUTHORIZATION_RECEIPT_VERSION,
-      domain: AUTHORIZATION_RECEIPT_DOMAIN,
-      invocationId: request.invocationId,
-      grantId: permit.grantId,
-      authority: this.#authorityAddress,
-      agent: permit.authorizedAgent,
-      permitDigest: request.permitDigest,
-      requestFingerprint: fingerprint,
-      decidedAt: this.#now(),
-    };
-  }
+  /**
+   * Returns the stored receipt, or builds and stores one from durable state.
+   * Receipts are derived only from the stored invocation, so a receipt
+   * produced after a restart describes exactly what was recorded.
+   */
+  async #ensureReceipt(invocation: InvocationRecord): Promise<SignedAuthorizationReceiptV1> {
+    if (invocation.receipt !== null) {
+      return invocation.receipt;
+    }
 
-  async #recordDenial(
-    permit: SignedPurchasePermitV1,
-    request: AuthorizationRequestV1,
-    fingerprint: string,
-    reasonCodes: string[],
-  ): Promise<SignedAuthorizationReceiptV1> {
+    if (invocation.state !== "DENIED" && invocation.state !== "CONFIRMED") {
+      throw new Error(`Invocation ${invocation.invocationId} in state ${invocation.state} has no decision receipt.`);
+    }
+
+    const { request } = invocation;
     const receipt = await signAuthorizationReceipt(
       {
-        ...this.#receiptBase(permit, request, fingerprint),
+        version: AUTHORIZATION_RECEIPT_VERSION,
+        domain: AUTHORIZATION_RECEIPT_DOMAIN,
+        invocationId: invocation.invocationId,
+        grantId: invocation.grantId,
+        authority: this.#authorityAddress,
+        agent: invocation.agent,
+        permitDigest: request.permitDigest,
+        requestFingerprint: invocation.fingerprint,
         service: request.service,
         capability: request.capability,
         network: request.network,
         mint: request.mint,
         recipient: request.recipient,
-        amountAtomic: request.amountAtomic,
-        decision: "DENY",
-        reasonCodes,
-        paymentTransactionId: null,
+        amountAtomic: invocation.amountAtomic,
+        decision: invocation.state === "CONFIRMED" ? "ALLOW" : "DENY",
+        reasonCodes: invocation.reasonCodes,
+        paymentTransactionId: invocation.paymentTransactionId,
+        decidedAt: invocation.decidedAt,
       },
       this.#authoritySigner,
     );
 
-    this.#log({
-      event: "authority.denied",
-      invocationId: request.invocationId,
-      grantId: permit.grantId,
-      agent: permit.authorizedAgent,
-      serviceId: request.service,
-      decision: "DENY",
-      reasonCodes,
-    });
+    return this.#store.attachReceipt(invocation.invocationId, receipt);
+  }
 
-    return receipt;
+  #auditDecision(permit: SignedPurchasePermitV1, invocation: InvocationRecord): void {
+    this.#auditLog.append({
+      type: "policy.decision",
+      actor: permit.authorizedAgent,
+      mandateId: permit.grantId,
+      data: {
+        allowed: invocation.state === "RESERVED",
+        reasonCodes: invocation.reasonCodes,
+        invocationId: invocation.invocationId,
+        amountAtomic: invocation.amountAtomic,
+      },
+    });
   }
 }

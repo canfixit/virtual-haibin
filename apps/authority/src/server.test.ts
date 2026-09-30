@@ -5,6 +5,7 @@ import type { Server } from "node:http";
 import type { PaymentProvider } from "@virtual-haibin/payments";
 import { AuthorityService, type AuthorizeRequestInput } from "./authorize.js";
 import { createAuthorityServer } from "./server.js";
+import { SqliteAuthorityStore } from "./store/sqlite-store.js";
 import {
   authorityAddress,
   authoritySigner,
@@ -23,6 +24,7 @@ async function startServer(paymentProvider: PaymentProvider): Promise<{ server: 
     authorityAddress,
     audience: TEST_AUDIENCE,
     paymentProvider,
+    store: new SqliteAuthorityStore(":memory:"),
     log: () => {},
   });
 
@@ -227,4 +229,35 @@ test("internal errors return a generic 500 without leaking error details", async
     console.error = originalConsoleError;
     await stopServer(internal);
   }
+});
+
+test("injected accounting fields cannot influence authorization anywhere in the request", async () => {
+  // Exhaust the grant: 20000 + 20000 of a 40000 total.
+  const permit = await buildSignedPermit({ maxPerCallAtomic: "20000", maxTotalAtomic: "40000" });
+  for (const invocationId of ["inv-inject-1", "inv-inject-2"]) {
+    const response = await postAuthorize(await signedInput(permit, { invocationId, amountAtomic: "20000" }));
+    assert.equal(((await response.json()) as { decision: string }).decision, "ALLOW");
+  }
+
+  const injected = { alreadySpentAtomic: "0", consumedAtomic: "0", reservedAtomic: "0", remainingAtomic: "40000" };
+  const callsBefore = provider.calls.length;
+
+  // 1. Inside the signed request: rejected by the strict protocol schema.
+  for (const [field, value] of Object.entries(injected)) {
+    const input = await signedInput(permit, { invocationId: `inv-inject-req-${field}`, amountAtomic: "20000" });
+    const response = await postAuthorize({ ...input, authorizationRequest: { ...input.authorizationRequest, [field]: value } });
+    assert.equal(response.status, 400, field);
+  }
+
+  // 2. At the top level of the body, and 3. inside the permit object: ignored
+  //    (never read, and not part of the verified permit or its digest), so
+  //    the authority's own durable total still denies the request.
+  const input = await signedInput(permit, { invocationId: "inv-inject-body", amountAtomic: "20000" });
+  const response = await postAuthorize({ ...input, ...injected, permit: { ...permit, ...injected } });
+  const body = (await response.json()) as { decision: string; receipt: { reasonCodes: string[] } };
+
+  assert.equal(response.status, 200);
+  assert.equal(body.decision, "DENY");
+  assert.deepEqual(body.receipt.reasonCodes, ["TOTAL_BUDGET_EXCEEDED"]);
+  assert.equal(provider.calls.length, callsBefore);
 });

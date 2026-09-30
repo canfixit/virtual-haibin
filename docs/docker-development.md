@@ -113,6 +113,8 @@ docker compose down -v
 
 The next `up --build` recreates them from the development image.
 
+**Warning:** `down -v` also deletes the `authority_data` volume, which holds the authority's durable SQLite state (`/data/authority.db`: grant budgets, invocation ids/states and receipts). Plain `docker compose down` and container restarts keep it. The database lives only on that volume; `*.db` files are gitignored and never belong in the source tree.
+
 ## Run checks inside Docker
 
 No Node.js or pnpm is required on the host:

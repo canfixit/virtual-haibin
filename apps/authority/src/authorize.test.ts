@@ -15,11 +15,13 @@ import {
   type AuthorityServiceOptions,
 } from "./authorize.js";
 import { AUTHORIZATION_RECEIPT_DOMAIN, type SignedAuthorizationReceiptV1 } from "./receipt.js";
+import { SqliteAuthorityStore } from "./store/sqlite-store.js";
 import {
   agentAddress,
   authorityAddress,
   authoritySigner,
   buildSignedPermit,
+  committedAtomic,
   CountingPaymentProvider,
   otherAgentIdentity,
   otherRecipientAddress,
@@ -39,6 +41,7 @@ function createService(
     authorityAddress,
     audience: TEST_AUDIENCE,
     paymentProvider,
+    store: new SqliteAuthorityStore(":memory:"),
     log: (entry) => logs.push(entry),
     ...options,
   });
@@ -72,7 +75,7 @@ test("Case 1 -- ALLOW: an agent-signed, authorized, in-budget request is allowed
   assert.equal(result.receipt.agent, agentAddress);
   assert.equal(result.receipt.permitDigest, await computePermitDigest(permit));
   assert.match(result.receipt.requestFingerprint, /^[0-9a-f]{64}$/);
-  assert.equal(service.getGrantSpentAtomic(permit.grantId), "10000");
+  assert.equal(await committedAtomic(service, permit), "10000");
 });
 
 test("Case 2 -- DENY overspend: per-call limit exceeded, no payment submitted", async () => {
@@ -85,7 +88,7 @@ test("Case 2 -- DENY overspend: per-call limit exceeded, no payment submitted", 
   assert.equal(result.receipt.decision, "DENY");
   assert.ok(result.receipt.reasonCodes.includes("PER_CALL_LIMIT_EXCEEDED"));
   assert.equal(provider.calls.length, 0);
-  assert.equal(service.getGrantSpentAtomic(permit.grantId), "0");
+  assert.equal(await committedAtomic(service, permit), "0");
 });
 
 test("Case 3 -- every semantic mismatch is denied with a stable reason code and no payment", async () => {
@@ -191,7 +194,7 @@ test("Case 5 -- shared budget: concurrent requests cannot collectively exceed th
   assert.equal(denied.length, 3);
   assert.ok(denied.every((result) => result.receipt.reasonCodes.includes("TOTAL_BUDGET_EXCEEDED")));
   assert.equal(provider.calls.length, 2);
-  assert.equal(service.getGrantSpentAtomic(permit.grantId), "40000");
+  assert.equal(await committedAtomic(service, permit), "40000");
 });
 
 test("expired permits are denied even though every signature is valid", async () => {
@@ -221,7 +224,7 @@ test("a request signed by a different agent is rejected, even for a valid permit
     "AGENT_SIGNATURE_INVALID",
   );
   assert.equal(provider.calls.length, 0);
-  assert.equal(service.getGrantSpentAtomic(permit.grantId), "0");
+  assert.equal(await committedAtomic(service, permit), "0");
 });
 
 test("modifying any signed request field after signing fails agent-signature verification", async () => {
@@ -373,7 +376,7 @@ test("same invocationId + different request returns INVOCATION_CONFLICT with no 
 
   const first = await service.authorize(await signedInput(permit, { invocationId: "inv-conflict-1", amountAtomic: "20000" }));
   assert.equal(first.receipt.decision, "ALLOW");
-  assert.equal(service.getGrantSpentAtomic(permit.grantId), "20000");
+  assert.equal(await committedAtomic(service, permit), "20000");
 
   for (const options of [{ amountAtomic: "10000" }, { fields: { recipient: otherRecipientAddress } }]) {
     await assert.rejects(
@@ -388,7 +391,7 @@ test("same invocationId + different request returns INVOCATION_CONFLICT with no 
   }
 
   assert.equal(provider.calls.length, 1);
-  assert.equal(service.getGrantSpentAtomic(permit.grantId), "20000");
+  assert.equal(await committedAtomic(service, permit), "20000");
 
   // Had the conflict reserved anything, this 20000 would exceed the 40000 total.
   const next = await service.authorize(await signedInput(permit, { invocationId: "inv-conflict-2", amountAtomic: "20000" }));
@@ -439,7 +442,7 @@ test("the same invocationId under a different permit is a conflict", async () =>
   await service.authorize(await signedInput(permitA, { invocationId: "inv-cross-grant-1" }));
   await assert.rejects(service.authorize(await signedInput(permitB, { invocationId: "inv-cross-grant-1" })), InvocationConflictError);
   assert.equal(provider.calls.length, 1);
-  assert.equal(service.getGrantSpentAtomic(permitB.grantId), "0");
+  assert.equal(await committedAtomic(service, permitB), "0");
 });
 
 // ---------------------------------------------------------------------------
@@ -475,7 +478,7 @@ test("an uncertain payment outcome blocks retries instead of paying again, and k
   await assert.rejects(service.authorize(input), ReconciliationRequiredError);
   await assert.rejects(service.authorize(input), ReconciliationRequiredError);
   assert.equal(timingOut.calls.length, 1);
-  assert.equal(service.getGrantSpentAtomic(permit.grantId), "20000");
+  assert.equal(await committedAtomic(service, permit), "20000");
   assert.ok(logs.some((entry) => entry.event === "authority.reconciliation_required"));
 
   // A different payload under the blocked invocationId is still a conflict, not a new attempt.
