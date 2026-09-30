@@ -9,13 +9,12 @@ export type PurchaseRequestV1 = {
   /** Integer atomic units, decimal string (no floating point). */
   amountAtomic: string;
   /**
-   * Caller-supplied running total already spent under this grant.
+   * Running total already spent/reserved under this grant.
    *
-   * TRANSITIONAL: this is not authoritative. Durable, atomically-reserved
-   * budget state lands in Phase 3 (see CLAUDE.md §13 / docs/mvp-plan.md
-   * MVP-3); until then a caller can misreport this value, so an ALLOW
-   * decision here must not be presented as proof of total-budget
-   * enforcement.
+   * Must come from the enforcing authority's own state, never from the
+   * agent or any other untrusted caller. apps/authority supplies it from
+   * process memory in Phase 2; durable, atomically-reserved storage that
+   * survives restart lands in Phase 3 (see CLAUDE.md §13).
    */
   alreadySpentAtomic: string;
   now?: number;

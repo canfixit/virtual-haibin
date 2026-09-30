@@ -134,12 +134,12 @@ Sequential or concurrent requests must not exceed the total delegated budget.
 
 ## Current implementation status
 
-The repository already contains a deterministic development vertical slice:
+The repository now contains a deterministic development vertical slice with a real signer boundary:
 
 ```text
 React UI
-  -> Virtual Haibin agent API
-  -> mandate/policy evaluation
+  -> Virtual Haibin agent (builds a typed purchase request; holds no signing key)
+  -> Authority service (verifies the signed permit, evaluates policy, reserves budget, pays, signs a decision receipt)
   -> mock external service agent
   -> simulated payment
   -> in-memory audit record
@@ -147,22 +147,25 @@ React UI
 
 The current UI exposes:
 
-- an allowed 0.01 USDC-equivalent request
-- a denied 0.10 request exceeding the current per-transaction limit
+- an allowed 10000-atomic-unit request (0.01 of a 6-decimal demo token, not USDC)
+- a denied 100000-atomic-unit request exceeding the per-call limit
+- a denied 10000-atomic-unit request where the service quotes an unauthorized recipient (semantic DENY)
 
-This is scaffolding, not yet completed verifiable authorization.
+Reusing an `invocationId` with the same request is idempotent (no second payment); reusing it with a different request returns HTTP 409 `INVOCATION_CONFLICT` with no payment and no budget change.
 
-Phase 1 adds a signed, versioned `PurchasePermit` v1 (`packages/mandate`: strict validation, RFC 8785 canonical signing payload, Ed25519 signing/verification via the Solana modular `@solana/addresses` / `@solana/keys` packages, integer atomic spending limits) and `evaluatePurchasePermit` (`packages/policy`: exact service/capability/network/mint/recipient checks with stable reason codes). Both are covered by automated tests but are **not yet wired into the running demo**: the agent still uses the deprecated legacy mandate/policy path until the Phase 2 authority service replaces it.
+Money on the agent -> authority path is integer atomic units as canonical decimal strings end to end. The mock service's `/quote` returns the authoritative `service`, `capability`, `network`, `mint`, `recipient` and `amountAtomic` (display label/decimals are separate and never used for authorization), and the agent forwards those fields verbatim to the authority.
+
+The full request/response JSON (including the authority's signed receipt) is visible via the UI's raw output panel; a dedicated judge-facing view comes in Phase 7.
 
 Current mocked/incomplete boundaries include:
 
-- signed-permit enforcement in the running demo (the agent still uses the legacy unsigned mandate)
-- signer isolation
-- persistent total-budget enforcement
-- service/recipient/mint binding
-- replay/idempotency state
-- real Solana settlement
-- independently verifiable evidence receipts
+- durable budget/replay state -- `apps/authority` tracks per-grant spend and per-invocation replay results only in process memory (see `apps/authority/src/authorize.ts`); this is enough to demonstrate atomic concurrent-request budget enforcement and replay idempotency, but it does not survive a restart
+- real Solana settlement -- payment is still `MockPaymentProvider` (`packages/payments`); no devnet transaction exists yet
+- service-side payment verification -- `apps/service-agent`'s `/execute` still trusts an arbitrary `x-payment-reference` header
+- independently verifiable evidence receipts -- the authority signs a decision receipt (`apps/authority/src/receipt.ts`) proving *it* made the decision, but this is not yet the full Phase 6 evidence bundle (no Solana settlement or service-result linkage yet), and there is no independent verifier tool
+- agent identity is ephemeral: the agent generates a fresh, non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds), and the demo permit is issued to that identity at startup by a simulated human issuer running in the same process; persistent agent identity storage and out-of-process permit issuance are future work
+- agent-to-authority transport authentication is a shared dev-only bearer secret (`AUTHORITY_SHARED_SECRET`, supplied at runtime from the gitignored `.env`); it is **not** treated as proof of agent identity -- every `/authorize` call must carry the agent's signature over a domain-separated request bound to the exact permit (SHA-256 digest), the authority audience, the invocation and all payment fields, verified against the permit's `authorizedAgent`
+- a payment attempt whose outcome is unknown blocks that invocation with `RECONCILIATION_REQUIRED` (HTTP 409) and keeps its budget reserved, but that state is in memory only and there is no reconciliation procedure yet
 
 The next implementation work replaces these boundaries incrementally.
 
@@ -171,7 +174,8 @@ The next implementation work replaces these boundaries incrementally.
 ```text
 apps/
   web/             # User-facing dashboard
-  agent/           # Autonomous agent runtime
+  agent/           # Autonomous agent runtime (no signing key)
+  authority/        # Protected signer/enforcement boundary
   service-agent/   # Demo / integration service
 
 packages/
@@ -181,8 +185,6 @@ packages/
   payments/        # Solana/payment abstractions
   audit/           # Action/evidence event models
 ```
-
-A protected signer/enforcement service will be introduced as part of the narrowed MVP.
 
 ## Engineering priorities
 
@@ -236,6 +238,17 @@ docker run --rm \
 cd virtual-haibin
 ```
 
+### Create the local secrets file
+
+Compose requires `AUTHORITY_SHARED_SECRET` (a dev-only agent -> authority bearer token) and will refuse to start without it. Create the gitignored `.env` once:
+
+```bash
+cp .env.example .env
+sed -i "s|^AUTHORITY_SHARED_SECRET=.*|AUTHORITY_SHARED_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '/+=')|" .env
+```
+
+Never commit `.env`. The authority refuses to start with the `.env.example` placeholder or a secret shorter than 32 characters.
+
 ### Start the complete development stack
 
 ```bash
@@ -246,6 +259,7 @@ This starts:
 
 - web UI: `http://localhost:5173`
 - Virtual Haibin agent: `http://localhost:4000`
+- authority (protected signer): `http://localhost:4002`
 - mock service agent: `http://localhost:4001`
 
 Open:

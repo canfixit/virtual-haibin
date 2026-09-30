@@ -7,11 +7,22 @@ x-app-image: &app-image
   image: virtual-haibin-dev:local
   working_dir: /workspace
 
+# Public demo identifiers shared by the mock service (which quotes them) and
+# the agent's simulated human permit issuer (which authorizes them). These are
+# randomly generated placeholder addresses with no key material behind them --
+# not secrets, not real USDC, and never mainnet. Phase 4 replaces them with a
+# real devnet demo mint and recipient.
+x-demo-payment-config: &demo-payment-config
+  VH_DEMO_NETWORK: "devnet"
+  VH_DEMO_MINT: "5XKfFXQUgrLT2CkDB84rAQMEzPhsJUpHk5TDLiCShpFV"
+  VH_DEMO_SERVICE_RECIPIENT: "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb"
+
 x-dev-volumes: &dev-volumes
   - .:/workspace
   - root_node_modules:/workspace/node_modules
   - web_node_modules:/workspace/apps/web/node_modules
   - agent_node_modules:/workspace/apps/agent/node_modules
+  - authority_node_modules:/workspace/apps/authority/node_modules
   - service_agent_node_modules:/workspace/apps/service-agent/node_modules
   - identity_node_modules:/workspace/packages/identity/node_modules
   - mandate_node_modules:/workspace/packages/mandate/node_modules
@@ -24,7 +35,11 @@ services:
     <<: *app-image
     command: ["pnpm", "dev:service"]
     environment:
+      <<: *demo-payment-config
       SERVICE_AGENT_PORT: "4001"
+      # Demo-only fault injection: the address the mock service quotes when
+      # asked for the wrong-recipient scenario (semantic DENY, demo Case 3).
+      VH_DEMO_WRONG_RECIPIENT: "DS2xXiLQwn48Laj3XYvCMETqUGXsjBUcXRFTP6G3NYVr"
     ports:
       - "4001:4001"
     volumes: *dev-volumes
@@ -41,17 +56,50 @@ services:
       retries: 10
       start_period: 5s
 
+  authority:
+    <<: *app-image
+    command: ["pnpm", "dev:authority"]
+    environment:
+      AUTHORITY_PORT: "4002"
+      # Non-secret audience identifier agents must name in signed requests.
+      AUTHORITY_AUDIENCE: "virtual-haibin-authority-dev"
+      # Dev-only shared bearer token authenticating agent -> authority HTTP
+      # calls. Supplied at runtime from the gitignored .env file (see
+      # .env.example); never commit a value here.
+      AUTHORITY_SHARED_SECRET: ${AUTHORITY_SHARED_SECRET:?AUTHORITY_SHARED_SECRET is required}
+    ports:
+      - "4002:4002"
+    volumes: *dev-volumes
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4002/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   agent:
     <<: *app-image
     command: ["pnpm", "dev:agent"]
     environment:
+      <<: *demo-payment-config
       AGENT_PORT: "4000"
       SERVICE_AGENT_URL: "http://service-agent:4001"
+      AUTHORITY_URL: "http://authority:4002"
+      AUTHORITY_AUDIENCE: "virtual-haibin-authority-dev"
+      AUTHORITY_SHARED_SECRET: ${AUTHORITY_SHARED_SECRET:?AUTHORITY_SHARED_SECRET is required}
     ports:
       - "4000:4000"
     volumes: *dev-volumes
     depends_on:
       service-agent:
+        condition: service_healthy
+      authority:
         condition: service_healthy
     healthcheck:
       test:
@@ -82,6 +130,7 @@ volumes:
   root_node_modules:
   web_node_modules:
   agent_node_modules:
+  authority_node_modules:
   service_agent_node_modules:
   identity_node_modules:
   mandate_node_modules:

@@ -9,13 +9,16 @@ type DemoState =
   | { status: "done"; label: string; response: unknown }
   | { status: "error"; label: string; message: string };
 
-async function executeDemo(quotedPrice: number): Promise<unknown> {
+type DemoScenario = "honest" | "wrong-recipient";
+
+/** amountAtomic is an integer string in the demo token's atomic units (6 decimals). */
+async function executeDemo(amountAtomic: string, scenario: DemoScenario): Promise<unknown> {
   const response = await fetch(`${agentApiUrl}/demo`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify({ quotedPrice }),
+    body: JSON.stringify({ amountAtomic, scenario }),
   });
 
   const payload = (await response.json()) as unknown;
@@ -30,11 +33,11 @@ async function executeDemo(quotedPrice: number): Promise<unknown> {
 export function App() {
   const [state, setState] = useState<DemoState>({ status: "idle" });
 
-  const run = async (label: string, quotedPrice: number) => {
+  const run = async (label: string, amountAtomic: string, scenario: DemoScenario = "honest") => {
     setState({ status: "loading", label });
 
     try {
-      const response = await executeDemo(quotedPrice);
+      const response = await executeDemo(amountAtomic, scenario);
       setState({ status: "done", label, response });
     } catch (error) {
       setState({
@@ -59,24 +62,33 @@ export function App() {
       <section className="panel">
         <h2>Development vertical slice</h2>
         <p>
-          The demo mandate permits research and caps each transaction at
-          0.02 USDC with a total budget of 0.05 USDC.
+          The signed demo permit authorizes research and caps each
+          transaction at 20000 atomic units (0.02 of a 6-decimal demo token)
+          with a total budget of 50000 (0.05). The demo token is a
+          placeholder devnet-style mint, not real USDC.
         </p>
 
         <div className="actions">
           <button
             type="button"
             disabled={state.status === "loading"}
-            onClick={() => void run("Allowed request", 0.01)}
+            onClick={() => void run("Allowed request (10000)", "10000")}
           >
             Run allowed request
           </button>
           <button
             type="button"
             disabled={state.status === "loading"}
-            onClick={() => void run("Denied overspend", 0.1)}
+            onClick={() => void run("Denied overspend (100000)", "100000")}
           >
             Run denied overspend
+          </button>
+          <button
+            type="button"
+            disabled={state.status === "loading"}
+            onClick={() => void run("Denied wrong recipient (10000)", "10000", "wrong-recipient")}
+          >
+            Run denied wrong recipient
           </button>
         </div>
       </section>

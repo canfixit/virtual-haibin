@@ -175,6 +175,34 @@ importers:
 
   apps/agent:
     dependencies:
+      '@solana/addresses':
+        specifier: ^8.3.0
+        version: 8.3.0(typescript@6.0.3)
+      '@solana/keys':
+        specifier: ^8.3.0
+        version: 8.3.0(typescript@6.0.3)
+      '@virtual-haibin/audit':
+        specifier: workspace:*
+        version: link:../../packages/audit
+      '@virtual-haibin/mandate':
+        specifier: workspace:*
+        version: link:../../packages/mandate
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.6
+        version: 24.13.6
+
+  apps/authority:
+    dependencies:
+      '@solana/addresses':
+        specifier: ^8.3.0
+        version: 8.3.0(typescript@6.0.3)
+      '@solana/codecs-strings':
+        specifier: ^8.3.0
+        version: 8.3.0(typescript@6.0.3)
+      '@solana/keys':
+        specifier: ^8.3.0
+        version: 8.3.0(typescript@6.0.3)
       '@virtual-haibin/audit':
         specifier: workspace:*
         version: link:../../packages/audit
@@ -187,6 +215,9 @@ importers:
       '@virtual-haibin/policy':
         specifier: workspace:*
         version: link:../../packages/policy
+      canonicalize:
+        specifier: ^5.1.0
+        version: 5.1.0
     devDependencies:
       '@types/node':
         specifier: 24.13.6

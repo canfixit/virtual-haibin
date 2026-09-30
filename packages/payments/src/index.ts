@@ -1,8 +1,12 @@
 export type PaymentRequest = {
   from: string;
+  /** Authoritative recipient address, never a display name. */
   to: string;
-  token: string;
-  amount: number;
+  /** Authoritative token mint address, never a display symbol. */
+  mint: string;
+  network: string;
+  /** Integer atomic units, canonical decimal string (no floating point). */
+  amountAtomic: string;
   reference: string;
 };
 

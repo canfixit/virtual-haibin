@@ -8,9 +8,10 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "dev": "pnpm --parallel --filter @virtual-haibin/web --filter @virtual-haibin/agent --filter @virtual-haibin/service-agent run dev",
+    "dev": "pnpm --parallel --filter @virtual-haibin/web --filter @virtual-haibin/agent --filter @virtual-haibin/authority --filter @virtual-haibin/service-agent run dev",
     "dev:web": "pnpm --filter @virtual-haibin/web dev",
     "dev:agent": "pnpm --filter @virtual-haibin/agent dev",
+    "dev:authority": "pnpm --filter @virtual-haibin/authority dev",
     "dev:service": "pnpm --filter @virtual-haibin/service-agent dev",
     "typecheck": "pnpm -r --if-present typecheck",
     "build": "pnpm --filter @virtual-haibin/web build",

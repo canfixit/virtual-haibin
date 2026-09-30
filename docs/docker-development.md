@@ -40,6 +40,17 @@ cd virtual-haibin
 
 No Git binary is installed into WSL. The `.git` directory belongs to the project as normal.
 
+## Create the local secrets file
+
+Compose requires `AUTHORITY_SHARED_SECRET` (a dev-only agent -> authority bearer token) and will refuse to start without it. Create the gitignored `.env` once:
+
+```bash
+cp .env.example .env
+sed -i "s|^AUTHORITY_SHARED_SECRET=.*|AUTHORITY_SHARED_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '/+=')|" .env
+```
+
+Never commit `.env`. The authority refuses to start with the `.env.example` placeholder or a secret shorter than 32 characters.
+
 ## Start the development stack
 
 ```bash
@@ -50,12 +61,14 @@ Services:
 
 - web UI: http://localhost:5173
 - Virtual Haibin agent: http://localhost:4000
+- authority (protected signer): http://localhost:4002
 - mock service agent: http://localhost:4001
 
-The agent talks to the service agent over Docker's internal network using:
+The agent talks to the service agent and authority over Docker's internal network using:
 
 ```text
 http://service-agent:4001
+http://authority:4002
 ```
 
 The browser talks to the exposed agent port using:
