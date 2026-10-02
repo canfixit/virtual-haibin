@@ -1,7 +1,7 @@
 // Worker for sqlite-store.test.ts: one thread = one independent SQLite
 // connection, contending with the others for the same grant's budget.
 import { parentPort, workerData } from "node:worker_threads";
-import { AUTHORIZATION_REQUEST_PROTOCOL, AUTHORIZATION_REQUEST_VERSION } from "@virtual-haibin/mandate";
+import { AUTHORIZATION_REQUEST_PROTOCOL, AUTHORIZATION_REQUEST_VERSION_2 } from "@virtual-haibin/mandate";
 import { SqliteAuthorityStore } from "./sqlite-store.js";
 
 type WorkerInput = {
@@ -30,18 +30,19 @@ for (let index = 0; index < input.perWorker; index += 1) {
       agent: "Agent1111111111111111111111111111111111111",
       request: {
         protocol: AUTHORIZATION_REQUEST_PROTOCOL,
-        version: AUTHORIZATION_REQUEST_VERSION,
+        version: AUTHORIZATION_REQUEST_VERSION_2,
         audience: "test-authority",
         grantId: "grant-1",
         permitDigest: "a".repeat(64),
         invocationId,
-        service: "mock-research-agent",
-        capability: "research.summary",
+        service: "mock-dataset-reports",
+        capability: "reports.generate",
         network: "devnet",
         mint: "Mint111111111111111111111111111111111111111",
         recipient: "Recipient11111111111111111111111111111111111",
         amountAtomic: input.amountAtomic,
         issuedAt: 1,
+        operation: { method: "POST", resource: "/api/v1/report", operation: "summarize", datasetId: "dataset-a" },
       },
       amountAtomic: input.amountAtomic,
       decidedAt: 1,

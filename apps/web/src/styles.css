@@ -92,3 +92,56 @@ h1 {
   background: #161616;
   line-height: 1.45;
 }
+
+.actions.secondary button:first-child {
+  color: inherit;
+  background: #ffffff;
+}
+
+.muted {
+  margin-top: 20px;
+  color: #555555;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin-top: 16px;
+}
+
+.facts dt {
+  font-weight: 600;
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.decision {
+  font-size: 1.6rem;
+  font-weight: 800;
+}
+
+.allow {
+  color: #0a7a2f;
+}
+
+.deny {
+  color: #b00020;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  max-width: 420px;
+  margin-top: 12px;
+}
+
+.field input {
+  padding: 8px 10px;
+  border: 1px solid #b5b5b5;
+  border-radius: 8px;
+  font: inherit;
+}

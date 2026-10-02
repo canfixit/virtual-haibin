@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { PaymentNotSubmittedError, type PaymentAttempt, type PaymentProvider } from "@virtual-haibin/payments";
 import {
   AuthorityService,
+  IssuerNotEntitledError,
   InvocationConflictError,
   PaidServiceUnavailableFailure,
   PaymentNotSubmittedFailure,
@@ -41,7 +42,8 @@ const attemptTemplate: PaymentAttempt = {
   amountAtomic: "10000",
   blockhash: "SURFNETxSAFEHASHxxxxxxxxxxxxxxxxxxx1ace1111",
   lastValidBlockHeight: "1000",
-  resourceUrl: "http://paid.test/api/v1/research",
+  resourceUrl: "http://paid.test/api/v1/report",
+    requestSha256: "c".repeat(64),
   preparedAt: 1,
 };
 
@@ -159,9 +161,23 @@ test("a request the permit does not allow is denied without contacting the servi
 
 test("permits without a settlement profile, or for an unregistered capability, cannot pay", async () => {
   const { provider, service } = setup();
-
   const devnetPermit = await buildSignedPermit({ network: "devnet" });
-  const devnet = await service.authorize(await signedInput(devnetPermit, { invocationId: "inv-devnet-1" }));
+
+  // The trusted issuer is entitled only to the sandbox profile: refused outright.
+  await assert.rejects(service.authorize(await signedInput(devnetPermit, { invocationId: "inv-devnet-0" })), IssuerNotEntitledError);
+
+  // Even an issuer entitled to devnet cannot pay there: no settlement profile exists.
+  const widerTrust = new AuthorityService({
+    authoritySigner,
+    authorityAddress,
+    audience: TEST_AUDIENCE,
+    ...TEST_PAYMENT_CONFIG,
+    issuerEntitlement: { issuer: TEST_PAYMENT_CONFIG.issuerEntitlement.issuer, settlementProfiles: ["solana-payment-sandbox", "devnet"] },
+    paymentProvider: provider,
+    store: new SqliteAuthorityStore(":memory:"),
+    log: () => {},
+  });
+  const devnet = await widerTrust.authorize(await signedInput(devnetPermit, { invocationId: "inv-devnet-1" }));
   assert.deepEqual(devnet.receipt.reasonCodes, ["SETTLEMENT_PROFILE_UNAVAILABLE"]);
 
   const otherCapability = await buildSignedPermit({ capability: "research.other" });

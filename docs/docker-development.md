@@ -63,6 +63,7 @@ Services:
 - Virtual Haibin agent: http://localhost:4000
 - authority (protected signer): http://localhost:4002
 - mock service agent: http://localhost:4001
+- approver (human-approval boundary): http://127.0.0.1:4003 (host loopback only, on its own `approval` network)
 
 The agent talks to the service agent and authority over Docker's internal network using:
 
@@ -75,6 +76,25 @@ The browser talks to the exposed agent port using:
 
 ```text
 http://localhost:4000
+```
+
+The browser also talks to the approver at `http://127.0.0.1:4003`. Approvals require the human's approval code, which lives only in the approver's private volume:
+
+```bash
+docker compose exec approver cat /keys/approval-code
+```
+
+Volumes involved in the approval boundary:
+
+- `approver_keys`: the issuer private key seed and the approval code. Mounted **only** by `approver`.
+- `issuer_trust`: the issuer **public** key. Written by `approver`, mounted read-only by `authority`.
+
+Scripted demo and integration runs use the `demo-driver` tools container. It stands in for the human's browser and can reach both the approver and the agent:
+
+```bash
+docker compose run --rm \
+  -e APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)" \
+  demo-driver node scripts/semantic-demo.mjs
 ```
 
 ## Run in the background
@@ -114,6 +134,8 @@ docker compose down -v
 The next `up --build` recreates them from the development image.
 
 **Warning:** `down -v` also deletes the `authority_data` volume, which holds the authority's durable SQLite state (`/data/authority.db`: grant budgets, invocation ids/states and receipts). Plain `docker compose down` and container restarts keep it. The database lives only on that volume; `*.db` files are gitignored and never belong in the source tree.
+
+`down -v` likewise deletes `approver_keys` and `issuer_trust`. On the next start the approver creates a **new** issuer key and approval code, and the authority trusts only the new issuer.
 
 ## Run checks inside Docker
 

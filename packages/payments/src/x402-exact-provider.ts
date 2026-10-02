@@ -4,6 +4,7 @@ import { x402Client, x402HTTPClient } from "@x402/core/client";
 import type { Network, PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import { ExactSvmScheme } from "@x402/svm/exact/client";
 import type { SettlementProfile } from "./settlement-profile.js";
+import { computePaidRequestDigest, paidRequestMatches, type PaidRequest } from "./paid-request.js";
 import { associatedTokenAddress, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, validateExactPaymentTransaction } from "./transaction-validator.js";
 import {
   PaidServiceUnavailableError,
@@ -12,7 +13,6 @@ import {
   type ChallengeResult,
   type ConfirmedSettlement,
   type ExecuteInput,
-  type PaidResource,
   type PaidResult,
   type PaymentAttempt,
   type PaymentChallenge,
@@ -144,14 +144,17 @@ export class X402ExactPaymentProvider implements PaymentProvider {
     ]);
   }
 
-  async fetchChallenge(resource: PaidResource, context: { reference: string }): Promise<ChallengeResult> {
+  async fetchChallenge(request: PaidRequest, context: { reference: string }): Promise<ChallengeResult> {
+    // Bind the challenge to what is actually sent, recomputed from the fields.
+    const requestSha256 = computePaidRequestDigest(request);
     let response: Response;
 
     try {
-      response = await this.#fetch(resource.url, {
-        method: resource.method,
+      response = await this.#fetch(request.url, {
+        method: request.method,
         redirect: "manual",
-        headers: { accept: "application/json", "x-vh-invocation-id": context.reference },
+        headers: { accept: "application/json", "content-type": request.contentType, "x-vh-invocation-id": context.reference },
+        body: request.body,
         signal: AbortSignal.timeout(this.#httpTimeoutMs),
       });
     } catch (error) {
@@ -188,16 +191,22 @@ export class X402ExactPaymentProvider implements PaymentProvider {
       return { kind: "rejected", reasonCode: "CHALLENGE_MALFORMED", message: "402 response has no parsable x402 PAYMENT-REQUIRED challenge." };
     }
 
-    return normalizeChallenge(decoded);
+    return normalizeChallenge(decoded, requestSha256);
   }
 
   async execute(input: ExecuteInput): Promise<PaymentExecution> {
-    const { resource, challenge, requirement, reference } = input;
+    const { request, challenge, requirement, reference } = input;
     let payload: PaymentPayload;
     let attempt: PaymentAttempt;
 
     // ---- Before transmission: any failure here provably sent nothing. ----
     try {
+      // Pay only for the exact request that was quoted: same method, URL and
+      // body bytes as the unpaid probe that produced this challenge.
+      if (!paidRequestMatches(request, challenge.requestSha256)) {
+        throw new Error("Paid request does not match the request the challenge was issued for.");
+      }
+
       const raw = challenge.raw as PaymentRequired;
       const original = raw.accepts[requirement.acceptsIndex];
 
@@ -249,7 +258,8 @@ export class X402ExactPaymentProvider implements PaymentProvider {
         amountAtomic: requirement.amountAtomic,
         blockhash,
         lastValidBlockHeight: lastValidBlockHeight.toString(),
-        resourceUrl: resource.url,
+        resourceUrl: request.url,
+        requestSha256: request.sha256,
         preparedAt: Date.now(),
       };
 
@@ -264,14 +274,16 @@ export class X402ExactPaymentProvider implements PaymentProvider {
     let response: Response;
 
     try {
-      response = await this.#fetch(resource.url, {
-        method: resource.method,
+      response = await this.#fetch(request.url, {
+        method: request.method,
         redirect: "manual",
         headers: {
           accept: "application/json",
+          "content-type": request.contentType,
           "x-vh-invocation-id": reference,
           ...this.#http.encodePaymentSignatureHeader(payload),
         },
+        body: request.body,
         signal: AbortSignal.timeout(this.#httpTimeoutMs),
       });
     } catch (error) {
@@ -477,7 +489,7 @@ export class X402ExactPaymentProvider implements PaymentProvider {
 }
 
 /** Strictly normalizes a decoded x402 PaymentRequired. Fails closed on anything unexpected. */
-export function normalizeChallenge(decoded: unknown): ChallengeResult {
+export function normalizeChallenge(decoded: unknown, requestSha256: string): ChallengeResult {
   if (!isRecord(decoded)) {
     return { kind: "rejected", reasonCode: "CHALLENGE_MALFORMED", message: "Challenge is not an object." };
   }
@@ -538,7 +550,7 @@ export function normalizeChallenge(decoded: unknown): ChallengeResult {
     return { kind: "rejected", reasonCode: "CHALLENGE_MALFORMED", message: "Challenge has no well-formed payment requirement." };
   }
 
-  const challenge: PaymentChallenge = { kind: "challenge", requirements, raw: decoded };
+  const challenge: PaymentChallenge = { kind: "challenge", requirements, requestSha256, raw: decoded };
   return challenge;
 }
 

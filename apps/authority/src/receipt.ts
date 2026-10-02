@@ -2,6 +2,7 @@ import { getAddressFromPublicKey } from "@solana/addresses";
 import { getBase58Decoder } from "@solana/codecs-strings";
 import { signBytes } from "@solana/keys";
 import canonicalize from "canonicalize";
+import type { ExactOperationV1 } from "@virtual-haibin/mandate";
 
 /**
  * Domain-separated, signed record of one authority decision. This is
@@ -13,6 +14,12 @@ import canonicalize from "canonicalize";
  */
 export const AUTHORIZATION_RECEIPT_DOMAIN = "virtual-haibin/authorization-receipt";
 export const AUTHORIZATION_RECEIPT_VERSION = 1;
+/**
+ * v2 (Phase 4.5) adds the exact operation the decision was about. Issued
+ * for every AuthorizationRequest v2; v1 receipts remain only for
+ * invocations recorded before operation binding existed.
+ */
+export const AUTHORIZATION_RECEIPT_VERSION_2 = 2;
 
 export type UnsignedAuthorizationReceiptV1 = {
   version: typeof AUTHORIZATION_RECEIPT_VERSION;
@@ -39,6 +46,14 @@ export type UnsignedAuthorizationReceiptV1 = {
   decidedAt: number;
 };
 
+export type UnsignedAuthorizationReceiptV2 = Omit<UnsignedAuthorizationReceiptV1, "version"> & {
+  version: typeof AUTHORIZATION_RECEIPT_VERSION_2;
+  /** The operation the agent requested (and, on ALLOW, the human approved and the authority sent). */
+  operation: ExactOperationV1;
+  /** computeOperationDigest(operation). */
+  operationDigest: string;
+};
+
 export type AuthorizationReceiptSignature = {
   algorithm: "ed25519";
   signature: string;
@@ -48,7 +63,14 @@ export type SignedAuthorizationReceiptV1 = UnsignedAuthorizationReceiptV1 & {
   signature: AuthorizationReceiptSignature;
 };
 
-function canonicalizeReceipt(receipt: UnsignedAuthorizationReceiptV1): Uint8Array {
+export type SignedAuthorizationReceiptV2 = UnsignedAuthorizationReceiptV2 & {
+  signature: AuthorizationReceiptSignature;
+};
+
+export type UnsignedAuthorizationReceipt = UnsignedAuthorizationReceiptV1 | UnsignedAuthorizationReceiptV2;
+export type SignedAuthorizationReceipt = SignedAuthorizationReceiptV1 | SignedAuthorizationReceiptV2;
+
+function canonicalizeReceipt(receipt: UnsignedAuthorizationReceipt): Uint8Array {
   const canonicalJson = canonicalize(receipt);
 
   if (canonicalJson === undefined) {
@@ -59,10 +81,10 @@ function canonicalizeReceipt(receipt: UnsignedAuthorizationReceiptV1): Uint8Arra
   return new TextEncoder().encode(domainPrefix + canonicalJson);
 }
 
-export async function signAuthorizationReceipt(
-  unsigned: UnsignedAuthorizationReceiptV1,
+export async function signAuthorizationReceipt<R extends UnsignedAuthorizationReceipt>(
+  unsigned: R,
   authoritySigner: CryptoKeyPair,
-): Promise<SignedAuthorizationReceiptV1> {
+): Promise<R & { signature: AuthorizationReceiptSignature }> {
   const signerAddress = await getAddressFromPublicKey(authoritySigner.publicKey);
 
   if (signerAddress !== unsigned.authority) {

@@ -1,4 +1,6 @@
 export * from "./types.js";
+export { computePaidRequestDigest, createPaidRequest, paidRequestMatches } from "./paid-request.js";
+export type { PaidRequest } from "./paid-request.js";
 export * from "./settlement-profile.js";
 export { MockPaymentProvider } from "./mock-provider.js";
 export type { MockChallengeTerms, MockExecuteBehavior, MockPaymentProviderOptions } from "./mock-provider.js";

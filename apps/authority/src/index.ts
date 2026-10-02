@@ -7,6 +7,7 @@ import { AuthorityService } from "./authorize.js";
 import { createPaidServiceRegistry } from "./payment-challenge.js";
 import { createAuthorityServer } from "./server.js";
 import { SqliteAuthorityStore } from "./store/sqlite-store.js";
+import { loadIssuerEntitlement } from "./trust.js";
 
 const port = Number(process.env.AUTHORITY_PORT ?? 4002);
 const sharedSecret = process.env.AUTHORITY_SHARED_SECRET;
@@ -20,10 +21,17 @@ const databasePath = process.env.AUTHORITY_DB_PATH;
 
 // Trusted settlement + paid-service configuration (authority-only env).
 const sandboxRpcUrl = process.env.SANDBOX_RPC_URL;
-const paidResearchUrl = process.env.PAID_SERVICE_RESEARCH_URL;
+const paidReportUrl = process.env.PAID_SERVICE_REPORT_URL;
+// Issuer trust root: file holding the one trusted issuer public key
+// (read-only mount; see trust.ts).
+const trustedIssuerFile = process.env.AUTHORITY_TRUSTED_ISSUER_FILE;
 
-if (!sandboxRpcUrl || !paidResearchUrl) {
-  throw new Error("SANDBOX_RPC_URL and PAID_SERVICE_RESEARCH_URL are required (see compose.yaml).");
+if (!sandboxRpcUrl || !paidReportUrl) {
+  throw new Error("SANDBOX_RPC_URL and PAID_SERVICE_REPORT_URL are required (see compose.yaml).");
+}
+
+if (!trustedIssuerFile) {
+  throw new Error("AUTHORITY_TRUSTED_ISSUER_FILE is required (see compose.yaml).");
 }
 
 if (!databasePath) {
@@ -71,8 +79,12 @@ const { surfnetVersion } = await paymentProvider.assertSandboxEnvironment();
 await paymentProvider.fundSandboxWallet(SANDBOX_USDC_MINT, 100_000_000n);
 
 const paidServices = createPaidServiceRegistry([
-  { serviceId: "mock-research-agent", capability: "research.summary", url: paidResearchUrl, method: "GET" },
+  { serviceId: "mock-dataset-reports", capability: "reports.generate", url: paidReportUrl, method: "POST" },
 ]);
+
+// Only this issuer may authorize spending from the payment wallet above, and
+// only on the sandbox profile.
+const issuerEntitlement = loadIssuerEntitlement(trustedIssuerFile, [sandboxProfile.permitNetwork]);
 
 mkdirSync(dirname(databasePath), { recursive: true });
 const store = new SqliteAuthorityStore(databasePath);
@@ -81,6 +93,7 @@ const authorityService = new AuthorityService({
   authoritySigner,
   authorityAddress,
   audience,
+  issuerEntitlement,
   paymentProvider,
   paidServices,
   settlementProfiles: new Map([[sandboxProfile.permitNetwork, sandboxProfile]]),
@@ -134,6 +147,7 @@ server.listen(port, () => {
       event: "authority.started",
       port,
       authorityAddress,
+      trustedIssuer: issuerEntitlement.issuer,
       databasePath,
       recoveredToReconciliation: interrupted.reconciliationRequired.length,
       releasedNeverSubmitted: interrupted.releasedNeverSubmitted.length,

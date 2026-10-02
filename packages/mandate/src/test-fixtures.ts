@@ -1,7 +1,8 @@
 import { getAddressFromPublicKey, type Address } from "@solana/addresses";
 import { generateKeyPair } from "@solana/keys";
-import { PURCHASE_PERMIT_DOMAIN, PURCHASE_PERMIT_VERSION } from "./domain.js";
-import type { UnsignedPurchasePermitV1 } from "./types.js";
+import { PURCHASE_PERMIT_DOMAIN, PURCHASE_PERMIT_VERSION, PURCHASE_PERMIT_VERSION_2 } from "./domain.js";
+import type { ExactOperationV1 } from "./operation.js";
+import type { UnsignedPurchasePermitV1, UnsignedPurchasePermitV2 } from "./types.js";
 
 export const issuerKeypair = await generateKeyPair();
 export const otherIssuerKeypair = await generateKeyPair();
@@ -36,4 +37,15 @@ export function buildUnsignedPermit(overrides: Partial<UnsignedPurchasePermitV1>
     subdelegation: false,
     ...overrides,
   };
+}
+
+export const REPORT_RESOURCE = "/api/v1/report";
+
+export function buildOperation(overrides: Partial<ExactOperationV1> = {}): ExactOperationV1 {
+  return { method: "POST", resource: REPORT_RESOURCE, operation: "summarize", datasetId: "dataset-a", ...overrides };
+}
+
+export function buildUnsignedPermitV2(overrides: Partial<UnsignedPurchasePermitV2> = {}): UnsignedPurchasePermitV2 {
+  const { version: _v1, ...shared } = buildUnsignedPermit();
+  return { ...shared, version: PURCHASE_PERMIT_VERSION_2, operation: buildOperation(), ...overrides };
 }

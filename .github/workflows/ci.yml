@@ -39,6 +39,8 @@ jobs:
             pnpm --filter @virtual-haibin/policy test
             pnpm --filter @virtual-haibin/payments test
             pnpm --filter @virtual-haibin/authority test
+            pnpm --filter @virtual-haibin/approver test
+            pnpm --filter @virtual-haibin/agent test
             pnpm check
           '
 
@@ -78,9 +80,17 @@ jobs:
           curl --fail --silent --show-error http://localhost:4000/health > /dev/null
           curl --fail --silent --show-error http://localhost:4001/health > /dev/null
           curl --fail --silent --show-error http://localhost:4002/health > /dev/null
+          curl --fail --silent --show-error http://localhost:4003/health > /dev/null
 
-      - name: Sandbox integration scenarios (ALLOW, replay, conflict, denials, reconciliation)
-        run: docker compose exec -T agent node scripts/sandbox-integration.mjs
+      - name: Sandbox integration scenarios (approval, ALLOW, semantic denials, replay, conflict, reconciliation)
+        run: |
+          APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
+          docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/sandbox-integration.mjs
+
+      - name: Phase 4.5 semantic demo (same payment terms, different operation)
+        run: |
+          APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
+          docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/semantic-demo.mjs
 
       - name: Show container logs on failure
         if: failure()

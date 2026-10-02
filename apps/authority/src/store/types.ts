@@ -1,6 +1,6 @@
-import type { AuthorizationRequestV1 } from "@virtual-haibin/mandate";
+import type { AuthorizationRequestV1, AuthorizationRequestV2 } from "@virtual-haibin/mandate";
 import type { ConfirmedSettlement, PaidResult, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
-import type { SignedAuthorizationReceiptV1 } from "../receipt.js";
+import type { SignedAuthorizationReceipt } from "../receipt.js";
 
 /**
  * Durable authority state. This is the authoritative source of truth for
@@ -53,7 +53,7 @@ export interface AuthorityStore {
   listReconciliationRequired(): Promise<InvocationRecord[]>;
 
   /** Stores the signed receipt for a DENIED or CONFIRMED invocation (first receipt wins). */
-  attachReceipt(invocationId: string, receipt: SignedAuthorizationReceiptV1): Promise<SignedAuthorizationReceiptV1>;
+  attachReceipt(invocationId: string, receipt: SignedAuthorizationReceipt): Promise<SignedAuthorizationReceipt>;
 
   getInvocation(invocationId: string): Promise<InvocationRecord | null>;
 
@@ -74,6 +74,13 @@ export interface AuthorityStore {
   close(): Promise<void>;
 }
 
+/**
+ * A request as stored with its invocation. New invocations always store an
+ * AuthorizationRequest v2; v1 rows exist only from before operation binding
+ * (Phase 4.5) and are still readable for replay/reconciliation.
+ */
+export type StoredAuthorizationRequest = AuthorizationRequestV1 | AuthorizationRequestV2;
+
 export type InvocationState = "RESERVED" | "DENIED" | "CONFIRMED" | "FAILED" | "RECONCILIATION_REQUIRED";
 
 export type GrantTerms = {
@@ -89,8 +96,8 @@ export type ReserveInput = {
   fingerprint: string;
   grant: GrantTerms;
   agent: string;
-  /** The authenticated request, stored so receipts can be (re)built from durable state. */
-  request: AuthorizationRequestV1;
+  /** The authenticated request, stored so receipts and the outbound request can be (re)built from durable state. */
+  request: AuthorizationRequestV2;
   amountAtomic: string;
   decidedAt: number;
   /** The validated payment requirement from the service's 402 challenge, if one was obtained. */
@@ -130,7 +137,7 @@ export type InvocationRecord = {
   issuer: string;
   grantId: string;
   agent: string;
-  request: AuthorizationRequestV1;
+  request: StoredAuthorizationRequest;
   amountAtomic: string;
   state: InvocationState;
   reasonCodes: string[];
@@ -139,7 +146,7 @@ export type InvocationRecord = {
   paymentAttempt: PaymentAttempt | null;
   settlement: ConfirmedSettlement | null;
   result: PaidResult | null;
-  receipt: SignedAuthorizationReceiptV1 | null;
+  receipt: SignedAuthorizationReceipt | null;
   stateReason: string | null;
   decidedAt: number;
   createdAt: number;

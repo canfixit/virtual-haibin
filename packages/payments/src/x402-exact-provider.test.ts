@@ -24,10 +24,10 @@ import {
   PaidServiceUnavailableError,
   PaymentNotSubmittedError,
   PaymentOutcomeUnknownError,
-  type PaidResource,
   type PaymentAttempt,
   type PaymentChallenge,
 } from "./types.js";
+import { createPaidRequest, type PaidRequest } from "./paid-request.js";
 import { normalizeChallenge, X402ExactPaymentProvider } from "./x402-exact-provider.js";
 
 // Hermetic tests: a fake x402 merchant (headers built with the official
@@ -147,7 +147,7 @@ type MerchantMode = "settle" | "http500" | "reset" | "lie" | "redirect" | "free"
 const merchant = {
   mode: "settle" as MerchantMode,
   amount: "10000",
-  requests: [] as Array<{ paid: boolean; credentialTx: string | null; invocationHeader: string | null }>,
+  requests: [] as Array<{ paid: boolean; credentialTx: string | null; invocationHeader: string | null; method: string; body: string }>,
 };
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -170,7 +170,13 @@ async function handle(request: IncomingMessage, response: ServerResponse, baseUr
 
   const credential = request.headers["payment-signature"];
   const paid = typeof credential === "string";
-  const record = { paid, credentialTx: null as string | null, invocationHeader: (request.headers["x-vh-invocation-id"] as string) ?? null };
+  const record = {
+    paid,
+    credentialTx: null as string | null,
+    invocationHeader: (request.headers["x-vh-invocation-id"] as string) ?? null,
+    method: request.method ?? "",
+    body: await readBody(request),
+  };
   merchant.requests.push(record);
 
   if (!paid) {
@@ -188,7 +194,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, baseUr
     }
     const challenge = {
       x402Version: merchant.mode === "v1" ? 1 : 2,
-      resource: { url: `${baseUrl}/research` },
+      resource: { url: `${baseUrl}/report` },
       accepts: [
         {
           scheme: "exact",
@@ -246,7 +252,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, baseUr
 let server: Server;
 let baseUrl: string;
 let profile: SettlementProfile;
-let resource: PaidResource;
+let resource: PaidRequest;
 
 before(async () => {
   server = createServer((request, response) => void handle(request, response, baseUrl));
@@ -264,7 +270,7 @@ before(async () => {
     scheme: "exact",
     requiredBlockhashPrefix: "SURFNETxSAFEHASH",
   };
-  resource = { serviceId: "svc", capability: "cap", url: `${baseUrl}/research`, method: "GET" };
+  resource = createPaidRequest({ url: `${baseUrl}/report`, method: "POST", body: '{"datasetId":"dataset-a","operation":"summarize"}' });
 });
 
 after(async () => {
@@ -327,7 +333,7 @@ test("a real x402 v2 challenge is parsed into a normalized requirement", async (
       amountAtomic: "10000",
       feePayer,
       maxTimeoutSeconds: 300,
-      resourceUrl: `${baseUrl}/research`,
+      resourceUrl: `${baseUrl}/report`,
     },
   );
   assert.equal(merchant.requests[0]?.paid, false);
@@ -357,7 +363,7 @@ test("malformed, non-402, redirecting and unsupported-version responses are reje
 test("an unreachable service is reported as unavailable, not as a challenge", async () => {
   const p = await X402ExactPaymentProvider.create({ profile, httpTimeoutMs: 1_000 });
   await assert.rejects(
-    p.fetchChallenge({ ...resource, url: "http://127.0.0.1:9/unreachable" }, { reference: "inv-1" }),
+    p.fetchChallenge(createPaidRequest({ url: "http://127.0.0.1:9/unreachable", method: "POST", body: "{}" }), { reference: "inv-1" }),
     PaidServiceUnavailableError,
   );
 });
@@ -366,15 +372,15 @@ test("challenge normalization rejects non-canonical and non-string amounts (no f
   const base = { scheme: "exact", network: NETWORK, asset: mint, payTo, extra: { feePayer } };
 
   for (const amount of ["1.5", "01", "1e4", "-1", "", " 10", "18446744073709551616", 10000, 1.5]) {
-    const result = normalizeChallenge({ x402Version: 2, accepts: [{ ...base, amount }] });
+    const result = normalizeChallenge({ x402Version: 2, accepts: [{ ...base, amount }] }, "0".repeat(64));
     assert.equal(result.kind, "rejected", String(amount));
   }
 
   for (const decoded of [null, "x", { x402Version: 2 }, { x402Version: 2, accepts: [] }, { x402Version: 2, accepts: [42] }]) {
-    assert.equal(normalizeChallenge(decoded).kind, "rejected");
+    assert.equal(normalizeChallenge(decoded, "0".repeat(64)).kind, "rejected");
   }
 
-  const ok = normalizeChallenge({ x402Version: 2, accepts: [{ ...base, amount: "18446744073709551615" }] });
+  const ok = normalizeChallenge({ x402Version: 2, accepts: [{ ...base, amount: "18446744073709551615" }] }, "0".repeat(64));
   assert.equal(ok.kind === "challenge" && ok.requirements[0]?.amountAtomic, "18446744073709551615");
 });
 
@@ -389,7 +395,7 @@ test("payment is bound to the authority-fetched sandbox blockhash, not the servi
   const attempts: PaymentAttempt[] = [];
 
   const execution = await p.execute({
-    resource,
+    request: resource,
     challenge: parsed,
     requirement: parsed.requirements[0]!,
     reference: "inv-1",
@@ -428,7 +434,7 @@ test("a non-sandbox RPC blockhash is refused before signing or transmitting", as
   chain.blockhash = "7Xk1SomeRealLookingBlockhash1111111111111111";
 
   await assert.rejects(
-    p.execute({ resource, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async () => {} }),
+    p.execute({ request: resource, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async () => {} }),
     PaymentNotSubmittedError,
   );
   assert.equal(signer.signCount, 0);
@@ -448,7 +454,7 @@ test("if the attempt cannot be persisted, the credential is never transmitted", 
 
   await assert.rejects(
     p.execute({
-      resource,
+      request: resource,
       challenge: parsed,
       requirement: parsed.requirements[0]!,
       reference: "inv-1",
@@ -468,7 +474,7 @@ test("a tampered requirement (differs from the parsed challenge) is refused befo
 
   for (const tampered of [{ payTo: feePayer }, { amountAtomic: "1" }, { asset: payTo }, { feePayer: signer.address }]) {
     await assert.rejects(
-      p.execute({ resource, challenge: parsed, requirement: { ...parsed.requirements[0]!, ...tampered }, reference: "inv-1", beforeSubmit: async () => {} }),
+      p.execute({ request: resource, challenge: parsed, requirement: { ...parsed.requirements[0]!, ...tampered }, reference: "inv-1", beforeSubmit: async () => {} }),
       PaymentNotSubmittedError,
     );
   }
@@ -486,7 +492,7 @@ test("any failure after transmission is an unknown outcome carrying the recorded
 
     await assert.rejects(
       p.execute({
-        resource,
+        request: resource,
         challenge: parsed,
         requirement: parsed.requirements[0]!,
         reference: "inv-1",
@@ -509,7 +515,7 @@ test("lookupSettlement finds a landed payment by the payer signature and checks 
   const parsed = await challenge(p);
   let attempt: PaymentAttempt | null = null;
   merchant.mode = "settle";
-  await p.execute({ resource, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async (a) => void (attempt = a) });
+  await p.execute({ request: resource, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async (a) => void (attempt = a) });
 
   const found = await p.lookupSettlement(attempt!);
   assert.equal(found.status, "confirmed");
@@ -540,6 +546,7 @@ test("lookupSettlement reports pending while the blockhash may be valid, expired
     blockhash: SANDBOX_BLOCKHASH,
     lastValidBlockHeight: "1000",
     resourceUrl: resource.url,
+    requestSha256: resource.sha256,
     preparedAt: 0,
   };
 
@@ -552,9 +559,51 @@ test("lookupSettlement reports pending while the blockhash may be valid, expired
 test("the payment key is never exposed by the provider or its results", async () => {
   const p = await provider();
   const parsed = await challenge(p);
-  const execution = await p.execute({ resource, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async () => {} });
+  const execution = await p.execute({ request: resource, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async () => {} });
 
   const serialized = JSON.stringify([p, execution, parsed.requirements]);
   assert.ok(!/privateKey|secretKey|keyPair/i.test(serialized));
   assert.deepEqual(Object.keys(p), ["settlementProfile"]);
+});
+
+// ---------------------------------------------------------------------------
+// Request binding (Phase 4.5)
+// ---------------------------------------------------------------------------
+
+test("the unpaid probe and the paid retry carry exactly the same method and body", async () => {
+  const p = await provider();
+  const parsed = await challenge(p);
+  assert.equal(parsed.requestSha256, resource.sha256);
+
+  const execution = await p.execute({ request: resource, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async () => {} });
+
+  assert.deepEqual(
+    merchant.requests.map((r) => ({ paid: r.paid, method: r.method, body: r.body })),
+    [
+      { paid: false, method: "POST", body: resource.body },
+      { paid: true, method: "POST", body: resource.body },
+    ],
+  );
+  assert.equal(execution.attempt.requestSha256, resource.sha256);
+});
+
+test("paying for a different request than the one challenged is refused before signing or transmitting", async () => {
+  const signer = await countingSigner();
+  const p = await provider(signer);
+  const parsed = await challenge(p);
+
+  // Same URL and price, different business operation in the body.
+  const substituted = createPaidRequest({ url: resource.url, method: "POST", body: '{"datasetId":"dataset-a","operation":"export"}' });
+  // A request object that claims the challenged digest but carries other bytes.
+  const forged = { ...substituted, sha256: resource.sha256 };
+
+  for (const request of [substituted, forged]) {
+    await assert.rejects(
+      p.execute({ request, challenge: parsed, requirement: parsed.requirements[0]!, reference: "inv-1", beforeSubmit: async () => assert.fail("must not record an attempt") }),
+      PaymentNotSubmittedError,
+    );
+  }
+
+  assert.equal(signer.signCount, 0);
+  assert.equal(merchant.requests.filter((r) => r.paid).length, 0);
 });

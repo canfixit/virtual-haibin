@@ -8,7 +8,7 @@ x-app-image: &app-image
   working_dir: /workspace
 
 # Public demo identifiers shared by the mock service (which quotes them) and
-# the agent's simulated human permit issuer (which authorizes them). Not
+# the human-approval boundary (apps/approver, which authorizes them). Not
 # secrets.
 #   network   -- Virtual Haibin settlement profile name (not a chain id)
 #   mint      -- mainnet USDC mint address *as cloned into the Pay.sh Solana
@@ -36,8 +36,50 @@ x-dev-volumes: &dev-volumes
   - policy_node_modules:/workspace/packages/policy/node_modules
   - payments_node_modules:/workspace/packages/payments/node_modules
   - audit_node_modules:/workspace/packages/audit/node_modules
+  - approver_node_modules:/workspace/apps/approver/node_modules
 
 services:
+  # Human-approval boundary: the ONLY holder of the PurchasePermit issuer
+  # private key. The key and the human's approval code live in
+  # approver_keys, mounted by no other service; only the issuer PUBLIC key is
+  # written to issuer_trust. Every approval must present the approval code
+  # (read it with: docker compose exec approver cat /keys/approval-code).
+  # Own network + loopback-only port are defense in depth: on Docker Desktop
+  # other containers can still reach the port via host.docker.internal.
+  approver:
+    <<: *app-image
+    command: ["pnpm", "dev:approver"]
+    environment:
+      <<: *demo-payment-config
+      APPROVER_PORT: "4003"
+      APPROVER_KEY_FILE: "/keys/issuer-ed25519.seed"
+      APPROVER_CODE_FILE: "/keys/approval-code"
+      APPROVER_TRUST_FILE: "/trust/trusted-issuer"
+      APPROVER_ALLOWED_ORIGIN: "http://localhost:5173"
+    ports:
+      - "127.0.0.1:4003:4003"
+    networks:
+      - approval
+    volumes:
+      - .:/workspace
+      - root_node_modules:/workspace/node_modules
+      - approver_node_modules:/workspace/apps/approver/node_modules
+      - mandate_node_modules:/workspace/packages/mandate/node_modules
+      - approver_keys:/keys
+      - issuer_trust:/trust
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4003/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   service-agent:
     <<: *app-image
     command: ["pnpm", "dev:service"]
@@ -76,7 +118,10 @@ services:
       # Trusted settlement profile RPC and the only paid URL the authority
       # will ever call (never agent/service supplied).
       SANDBOX_RPC_URL: *sandbox-rpc
-      PAID_SERVICE_RESEARCH_URL: "http://service-agent:4001/api/v1/research"
+      PAID_SERVICE_REPORT_URL: "http://service-agent:4001/api/v1/report"
+      # Issuer trust root: the one issuer public key allowed to authorize
+      # spending (published by the approver; mounted read-only below).
+      AUTHORITY_TRUSTED_ISSUER_FILE: "/trust/trusted-issuer"
       # Dev-only shared bearer token authenticating agent -> authority HTTP
       # calls. Supplied at runtime from the gitignored .env file (see
       # .env.example); never commit a value here.
@@ -97,7 +142,12 @@ services:
       - policy_node_modules:/workspace/packages/policy/node_modules
       - payments_node_modules:/workspace/packages/payments/node_modules
       - audit_node_modules:/workspace/packages/audit/node_modules
+      - approver_node_modules:/workspace/apps/approver/node_modules
       - authority_data:/data
+      - issuer_trust:/trust:ro
+    depends_on:
+      approver:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -111,12 +161,14 @@ services:
       retries: 10
       start_period: 5s
 
+  # The autonomous agent: holds only its non-spending identity key. No issuer
+  # key, no trust volume, no route to the approver.
   agent:
     <<: *app-image
     command: ["pnpm", "dev:agent"]
     environment:
-      <<: *demo-payment-config
       AGENT_PORT: "4000"
+      AGENT_ALLOWED_ORIGIN: "http://localhost:5173"
       SERVICE_AGENT_URL: "http://service-agent:4001"
       AUTHORITY_URL: "http://authority:4002"
       AUTHORITY_AUDIENCE: "virtual-haibin-authority-dev"
@@ -142,11 +194,35 @@ services:
       retries: 10
       start_period: 5s
 
+  # Stands in for the human's browser/terminal in scripted demos and the
+  # sandbox integration test: it can reach the approver (approval network)
+  # and the agent/authority (default network). Only started on demand:
+  #   docker compose run --rm demo-driver node scripts/semantic-demo.mjs
+  demo-driver:
+    <<: *app-image
+    profiles: ["tools"]
+    command: ["node", "scripts/semantic-demo.mjs"]
+    environment:
+      AGENT_URL: "http://agent:4000"
+      APPROVER_URL: "http://approver:4003"
+      AUTHORITY_URL: "http://authority:4002"
+      SERVICE_URL: "http://service-agent:4001"
+      # Supplied by the operator per run, never stored in the repo:
+      #   docker compose run --rm -e APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)" demo-driver ...
+      APPROVER_CODE: ${APPROVER_CODE:-}
+      AUTHORITY_SHARED_SECRET: ${AUTHORITY_SHARED_SECRET:?AUTHORITY_SHARED_SECRET is required}
+    networks:
+      - default
+      - approval
+    volumes:
+      - .:/workspace
+
   web:
     <<: *app-image
     command: ["pnpm", "dev:web"]
     environment:
       VITE_AGENT_API_URL: "http://localhost:4000"
+      VITE_APPROVER_API_URL: "http://localhost:4003"
     ports:
       - "5173:5173"
     volumes: *dev-volumes
@@ -165,4 +241,13 @@ volumes:
   policy_node_modules:
   payments_node_modules:
   audit_node_modules:
+  approver_node_modules:
   authority_data:
+  # Issuer private key (approver only) and the published issuer public key.
+  approver_keys:
+  issuer_trust:
+
+networks:
+  default:
+  # The approver alone. Nothing else joins it except the demo-driver tool.
+  approval:

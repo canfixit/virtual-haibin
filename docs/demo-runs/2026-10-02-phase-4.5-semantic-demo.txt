@@ -1,0 +1,286 @@
+{
+  "step": "SETUP",
+  "agent": "JCh2AtQpn1MM2PHvHUrDuwqgjNL9nLrguGvxeQuKWUmD",
+  "humanIssuer": "51Cn2i8H1n2WHWXcb7aYNLA1LrMBjqTJ2QWw7VLyGaqr",
+  "merchantQuote": {
+    "service": "mock-dataset-reports",
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operations": [
+      "summarize",
+      "export"
+    ],
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "network": "solana-payment-sandbox",
+    "note": "same price for every operation"
+  }
+}
+{
+  "step": "APPROVE",
+  "grantId": "VH-GRANT-87db0d99-ad7d-4e14-994f-de41e200939c",
+  "issuer": "51Cn2i8H1n2WHWXcb7aYNLA1LrMBjqTJ2QWw7VLyGaqr",
+  "authorizedAgent": "JCh2AtQpn1MM2PHvHUrDuwqgjNL9nLrguGvxeQuKWUmD",
+  "approvedOperation": {
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operation": "summarize",
+    "datasetId": "dataset-a"
+  },
+  "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+  "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "maxPerCallAtomic": "20000",
+  "maxTotalAtomic": "50000",
+  "expiresAt": "2026-10-02T03:12:12.740Z",
+  "agentReceived": {
+    "installed": true,
+    "grantId": "VH-GRANT-87db0d99-ad7d-4e14-994f-de41e200939c",
+    "issuer": "51Cn2i8H1n2WHWXcb7aYNLA1LrMBjqTJ2QWw7VLyGaqr",
+    "operation": {
+      "method": "POST",
+      "resource": "/api/v1/report",
+      "operation": "summarize",
+      "datasetId": "dataset-a"
+    }
+  }
+}
+{
+  "step": "ALLOW",
+  "invocationId": "p45-1790908932635-summarize-a",
+  "requested": {
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operation": "summarize",
+    "datasetId": "dataset-a"
+  },
+  "quotedTerms": {
+    "service": "mock-dataset-reports",
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "network": "solana-payment-sandbox"
+  },
+  "httpStatus": 200,
+  "agentStatus": "COMPLETED",
+  "decision": "ALLOW",
+  "reasonCodes": [],
+  "replay": false,
+  "payment": {
+    "submitted": true,
+    "transactionId": "5JXi9PeARpL5s6aqZQ1K7pgZ7Pj5Lx9JfZYRLeMj5tbNse9efCKMTCmGBP22mh4ZdaXnhKdTVkkCs7bXxeTH8oBt",
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "settlementProfile": "solana-payment-sandbox",
+    "requestSha256": "4070a124a5d2e290c23d83e52d59eaa5c28e535e64b4f75d282de3551f6ddada"
+  },
+  "serviceReceived": {
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operation": "summarize",
+    "datasetId": "dataset-a"
+  },
+  "receipt": {
+    "version": 2,
+    "operation": {
+      "method": "POST",
+      "resource": "/api/v1/report",
+      "operation": "summarize",
+      "datasetId": "dataset-a"
+    },
+    "operationDigest": "dc56af88660a59d8d0577910b397dc870d59b91f08c5bb2250f66826128e986d",
+    "permitDigest": "37c379e529523a86cf8c75fe90c4d24ea89d67cfa702b851230cd72e680f757c",
+    "authority": "3NGpehMnz9UKVDRMFHTft4m752hbCHcuTmZi3UW8BBBX"
+  }
+}
+{
+  "step": "SEMANTIC_DENY",
+  "invocationId": "p45-1790908932635-export-a",
+  "requested": {
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operation": "export",
+    "datasetId": "dataset-a"
+  },
+  "quotedTerms": {
+    "service": "mock-dataset-reports",
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "network": "solana-payment-sandbox"
+  },
+  "httpStatus": 403,
+  "agentStatus": "DENIED",
+  "decision": "DENY",
+  "reasonCodes": [
+    "OPERATION_NOT_AUTHORIZED"
+  ],
+  "replay": false,
+  "payment": {
+    "submitted": false,
+    "transactionId": null,
+    "payTo": null,
+    "asset": null,
+    "amountAtomic": null,
+    "settlementProfile": null,
+    "requestSha256": null
+  },
+  "serviceReceived": null,
+  "receipt": {
+    "version": 2,
+    "operation": {
+      "method": "POST",
+      "resource": "/api/v1/report",
+      "operation": "export",
+      "datasetId": "dataset-a"
+    },
+    "operationDigest": "30d2afc9cbff0a0b0dfa9d2f8e484034fa0e957cdcce74817511f521a2f45cab",
+    "permitDigest": "37c379e529523a86cf8c75fe90c4d24ea89d67cfa702b851230cd72e680f757c",
+    "authority": "3NGpehMnz9UKVDRMFHTft4m752hbCHcuTmZi3UW8BBBX"
+  }
+}
+{
+  "step": "ARGUMENT_DENY",
+  "invocationId": "p45-1790908932635-summarize-b",
+  "requested": {
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operation": "summarize",
+    "datasetId": "dataset-b"
+  },
+  "quotedTerms": {
+    "service": "mock-dataset-reports",
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "network": "solana-payment-sandbox"
+  },
+  "httpStatus": 403,
+  "agentStatus": "DENIED",
+  "decision": "DENY",
+  "reasonCodes": [
+    "OPERATION_ARGUMENT_NOT_AUTHORIZED"
+  ],
+  "replay": false,
+  "payment": {
+    "submitted": false,
+    "transactionId": null,
+    "payTo": null,
+    "asset": null,
+    "amountAtomic": null,
+    "settlementProfile": null,
+    "requestSha256": null
+  },
+  "serviceReceived": null,
+  "receipt": {
+    "version": 2,
+    "operation": {
+      "method": "POST",
+      "resource": "/api/v1/report",
+      "operation": "summarize",
+      "datasetId": "dataset-b"
+    },
+    "operationDigest": "ceffd65ca1082c552d03b9d7ef57cb180e52f9ab56e26e03cf502018e0c00eaf",
+    "permitDigest": "37c379e529523a86cf8c75fe90c4d24ea89d67cfa702b851230cd72e680f757c",
+    "authority": "3NGpehMnz9UKVDRMFHTft4m752hbCHcuTmZi3UW8BBBX"
+  }
+}
+{
+  "step": "REPLAY",
+  "invocationId": "p45-1790908932635-summarize-a",
+  "requested": {
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operation": "summarize",
+    "datasetId": "dataset-a"
+  },
+  "quotedTerms": {
+    "service": "mock-dataset-reports",
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "network": "solana-payment-sandbox"
+  },
+  "httpStatus": 200,
+  "agentStatus": "REPLAYED",
+  "decision": "ALLOW",
+  "reasonCodes": [],
+  "replay": true,
+  "payment": {
+    "submitted": true,
+    "transactionId": "5JXi9PeARpL5s6aqZQ1K7pgZ7Pj5Lx9JfZYRLeMj5tbNse9efCKMTCmGBP22mh4ZdaXnhKdTVkkCs7bXxeTH8oBt",
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "settlementProfile": "solana-payment-sandbox",
+    "requestSha256": "4070a124a5d2e290c23d83e52d59eaa5c28e535e64b4f75d282de3551f6ddada"
+  },
+  "serviceReceived": {
+    "method": "POST",
+    "resource": "/api/v1/report",
+    "operation": "summarize",
+    "datasetId": "dataset-a"
+  },
+  "receipt": {
+    "version": 2,
+    "operation": {
+      "method": "POST",
+      "resource": "/api/v1/report",
+      "operation": "summarize",
+      "datasetId": "dataset-a"
+    },
+    "operationDigest": "dc56af88660a59d8d0577910b397dc870d59b91f08c5bb2250f66826128e986d",
+    "permitDigest": "37c379e529523a86cf8c75fe90c4d24ea89d67cfa702b851230cd72e680f757c",
+    "authority": "3NGpehMnz9UKVDRMFHTft4m752hbCHcuTmZi3UW8BBBX"
+  }
+}
+{
+  "step": "SUMMARY",
+  "sameTermsForAllRequests": {
+    "service": "mock-dataset-reports",
+    "payTo": "6hqZufQGmDeGCHtiSNnGT246hdpdBUZTUzgKbonDXSTb",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amountAtomic": "10000",
+    "network": "solana-payment-sandbox"
+  },
+  "results": [
+    {
+      "step": "ALLOW",
+      "requested": "summarize(dataset-a)",
+      "decision": "ALLOW",
+      "reasonCodes": [],
+      "paid": "5JXi9PeARpL5s6aqZQ1K7pgZ7Pj5Lx9JfZYRLeMj5tbNse9efCKMTCmGBP22mh4ZdaXnhKdTVkkCs7bXxeTH8oBt",
+      "replay": false
+    },
+    {
+      "step": "SEMANTIC_DENY",
+      "requested": "export(dataset-a)",
+      "decision": "DENY",
+      "reasonCodes": [
+        "OPERATION_NOT_AUTHORIZED"
+      ],
+      "paid": null,
+      "replay": false
+    },
+    {
+      "step": "ARGUMENT_DENY",
+      "requested": "summarize(dataset-b)",
+      "decision": "DENY",
+      "reasonCodes": [
+        "OPERATION_ARGUMENT_NOT_AUTHORIZED"
+      ],
+      "paid": null,
+      "replay": false
+    },
+    {
+      "step": "REPLAY",
+      "requested": "summarize(dataset-a)",
+      "decision": "ALLOW",
+      "reasonCodes": [],
+      "paid": "5JXi9PeARpL5s6aqZQ1K7pgZ7Pj5Lx9JfZYRLeMj5tbNse9efCKMTCmGBP22mh4ZdaXnhKdTVkkCs7bXxeTH8oBt",
+      "replay": true
+    }
+  ],
+  "failures": 0
+}

@@ -1,7 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
-import type { AuthorizationRequestV1 } from "@virtual-haibin/mandate";
 import type { ConfirmedSettlement, PaidResult, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
-import type { SignedAuthorizationReceiptV1 } from "../receipt.js";
+import type { SignedAuthorizationReceipt } from "../receipt.js";
 import {
   InvalidStateTransitionError,
   type AuthorityStore,
@@ -14,6 +13,7 @@ import {
   type RecoveryResult,
   type ReserveInput,
   type ReserveResult,
+  type StoredAuthorizationRequest,
 } from "./types.js";
 
 /**
@@ -155,7 +155,7 @@ function toInvocation(row: InvocationRow): InvocationRecord {
     issuer: row.issuer,
     grantId: row.grant_id,
     agent: row.agent,
-    request: JSON.parse(row.request_json) as AuthorizationRequestV1,
+    request: JSON.parse(row.request_json) as StoredAuthorizationRequest,
     amountAtomic: row.amount_atomic,
     state: row.state,
     reasonCodes: JSON.parse(row.reason_codes_json) as string[],
@@ -164,7 +164,7 @@ function toInvocation(row: InvocationRow): InvocationRecord {
     paymentAttempt: parseOrNull<PaymentAttempt>(row.payment_attempt_json),
     settlement: parseOrNull<ConfirmedSettlement>(row.settlement_json),
     result: parseOrNull<PaidResult>(row.result_json),
-    receipt: parseOrNull<SignedAuthorizationReceiptV1>(row.receipt_json),
+    receipt: parseOrNull<SignedAuthorizationReceipt>(row.receipt_json),
     stateReason: row.state_reason,
     decidedAt: row.decided_at,
     createdAt: row.created_at,
@@ -407,7 +407,7 @@ export class SqliteAuthorityStore implements AuthorityStore {
     });
   }
 
-  async attachReceipt(invocationId: string, receipt: SignedAuthorizationReceiptV1): Promise<SignedAuthorizationReceiptV1> {
+  async attachReceipt(invocationId: string, receipt: SignedAuthorizationReceipt): Promise<SignedAuthorizationReceipt> {
     return this.#transaction(() => {
       this.#statements.attachReceipt.run(JSON.stringify(receipt), this.#now(), invocationId);
       const invocation = this.#requireInvocation(invocationId);

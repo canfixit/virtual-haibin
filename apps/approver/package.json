@@ -1,0 +1,20 @@
+{
+  "name": "@virtual-haibin/approver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test 'src/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@solana/addresses": "^8.3.0",
+    "@solana/keys": "^8.3.0",
+    "@virtual-haibin/mandate": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6"
+  }
+}

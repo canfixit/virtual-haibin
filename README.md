@@ -138,11 +138,17 @@ Sequential or concurrent requests must not exceed the total delegated budget.
 The repository contains an end-to-end vertical slice in which an agent's purchase is authorized by Virtual Haibin and settled with a real x402 payment on the **Pay.sh Solana Payment Sandbox** (a hosted Surfpool test validator; no real funds):
 
 ```text
+Human (web UI + approval code)
+  -> Approver (separate process; the only holder of the issuer key)
+       signs a PurchasePermit v2 for one exact operation, e.g. summarize(dataset-a)
+  -> the signed permit is installed in the agent (the agent cannot create or widen one)
 React UI
-  -> Virtual Haibin agent (signs a typed purchase request with a non-spending identity key)
+  -> Virtual Haibin agent (signs a typed purchase request, incl. the operation, with a non-spending identity key)
   -> Authority service
-       verifies the signed permit and the agent's request signature
-       fetches the paid service's real HTTP 402 x402 challenge (trusted URL only)
+       verifies the signed permit, that its issuer is the pinned trusted issuer, and the agent's request signature
+       checks the requested operation against the human-approved one (exact match)
+       builds the outbound HTTP request from the verified operation
+       fetches the paid service's real HTTP 402 x402 challenge for exactly that request (trusted URL only)
        validates the challenge against the settlement profile, the request and the permit
        reserves budget atomically in SQLite
        signs the x402 "exact" payment with its own payment wallet
@@ -150,11 +156,15 @@ React UI
   -> authority confirms settlement on the pinned sandbox RPC, stores evidence, returns the paid result
 ```
 
-**Who does what.** Pay.sh / Solana Pay Kit (`@solana/pay-kit` on the service, `@x402/core` + `@x402/svm` on the authority) provide the payment protocol and settlement rail: the x402 v2 402 challenge, the `exact` SPL transfer, the facilitator that verifies and submits it. Virtual Haibin provides delegated authority on top of that rail: the signed PurchasePermit, agent authentication, semantic policy (service, capability, recipient, asset, amount), durable budget, replay/conflict protection and reconciliation. Virtual Haibin did not invent x402 and does not re-implement it. See [docs/payments-x402-sandbox.md](docs/payments-x402-sandbox.md) for the trust model.
+**Who does what.** Pay.sh / Solana Pay Kit (`@solana/pay-kit` on the service, `@x402/core` + `@x402/svm` on the authority) provide the payment protocol and settlement rail: the x402 v2 402 challenge, the `exact` SPL transfer, the facilitator that verifies and submits it. Virtual Haibin provides delegated authority on top of that rail: the human-signed PurchasePermit and issuer entitlement, agent authentication, semantic policy (exact operation and arguments, service, capability, recipient, asset, amount), durable budget, replay/conflict protection and reconciliation. Virtual Haibin did not invent x402 and does not re-implement it. See [docs/payments-x402-sandbox.md](docs/payments-x402-sandbox.md) for the trust model.
+
+**Phase 4.5: same payment, different meaning.** The paid service has one endpoint, `POST /api/v1/report`, where `summarize` and `export` cost exactly the same (same price, payTo, asset, network). The human approves `summarize(dataset-a)`. A fresh request for `export(dataset-a)` is denied with `OPERATION_NOT_AUTHORIZED`, and `summarize(dataset-b)` with `OPERATION_ARGUMENT_NOT_AUTHORIZED`. Neither is reserved, contacts the service or signs a payment. A permit signed by any key other than the pinned issuer is refused with `ISSUER_NOT_ENTITLED`. A valid payment does not necessarily mean the agent was authorized to buy that operation. See [docs/human-approval-and-semantic-authorization.md](docs/human-approval-and-semantic-authorization.md).
 
 The current UI exposes:
 
-- an allowed paid request: 0.01 sandbox USDC (`"10000"` base units) settled on the sandbox, returning the paid result
+- human approval of `summarize(dataset-a)` (requires the approval code from `docker compose exec approver cat /keys/approval-code`)
+- the approved operation: 0.01 sandbox USDC (`"10000"` base units) settled on the sandbox, returning the paid result
+- an unauthorized `export(dataset-a)` and `summarize(dataset-b)` at the same price: denied, nothing reserved or signed
 - a merchant that overcharges in its real 402 (challenge asks `"100000"`): denied, nothing signed
 - a merchant whose 402 redirects payment to another address: denied (`RECIPIENT_MISMATCH`), nothing signed
 - a merchant whose 402 asks for a different asset (sandbox USDT): denied (`ASSET_NOT_ALLOWED`, `MINT_MISMATCH`), nothing signed
@@ -171,18 +181,21 @@ Current limitations and remaining boundaries:
 - the authority's receipt-signing key and payment wallet are ephemeral per process; stored receipts stay verifiable against the address they name, and reconciliation needs only the stored payer signature, not the key
 - the paid service only receives payment through Pay Kit's own x402 verification; it does not yet verify Virtual Haibin's authorization evidence (Phase 5)
 - the authority signs a decision receipt, but there is no standalone evidence bundle or independent verifier yet (Phase 6)
-- agent identity is ephemeral: the agent generates a fresh non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds), and the demo permit is issued to it at startup by a simulated human issuer in the same process
+- agent identity is ephemeral: the agent generates a fresh non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds); after an agent restart the human must approve a new permit for the new identity
+- the human approval boundary is demo-grade: the issuer key is a seed file in the approver's private Docker volume, and approval is gated by a 128-bit approval code the human reads from that volume -- not a wallet, HSM or IAM system. The approver's own network and loopback-only port are defense in depth only; on Docker Desktop other containers can reach the port via `host.docker.internal`, which is why the approval code is required
+- one exact operation schema (`summarize`/`export` by `datasetId`) with exact-match comparison; no policy language
 - agent-to-authority transport authentication is a dev-only shared bearer secret (`AUTHORITY_SHARED_SECRET` in the gitignored `.env`); it is never treated as proof of agent identity -- the agent's request signature is
 - an invocation whose payment outcome is unknown is durably `RECONCILIATION_REQUIRED` (HTTP 409) with its budget reserved; reconciliation resolves it read-only against the sandbox (landed -> `CONFIRMED`; not landed and blockhash expired -> `FAILED`, reservation released). An invocation interrupted before its payment attempt was recorded was provably never transmitted (the attempt is durably committed before the credential can leave the authority), so startup recovery releases it as `FAILED`.
 
-CI (`.github/workflows/ci.yml`) has two jobs: a deterministic job (frozen install, all unit/security/persistence/payment-protocol tests with local fakes, typecheck/build inside the project image; no external network needed by tests) and a clearly labelled external integration job that starts the stack against the Pay.sh sandbox and runs `scripts/sandbox-integration.mjs`, with a separate sandbox-availability preflight.
+CI (`.github/workflows/ci.yml`) has two jobs: a deterministic job (frozen install, all unit/security/persistence/payment-protocol tests with local fakes, typecheck/build inside the project image; no external network needed by tests) and a clearly labelled external integration job that starts the stack against the Pay.sh sandbox and runs `scripts/sandbox-integration.mjs` and `scripts/semantic-demo.mjs` from the `demo-driver` tools container, with a separate sandbox-availability preflight.
 
 ## Core architecture
 
 ```text
 apps/
   web/             # User-facing dashboard
-  agent/           # Autonomous agent runtime (no signing key)
+  agent/           # Autonomous agent runtime (no signing key, no issuer key)
+  approver/        # Human-approval boundary (only holder of the permit-issuer key)
   authority/        # Protected signer/enforcement boundary
   service-agent/   # Demo / integration service
 
@@ -269,6 +282,7 @@ This starts:
 - Virtual Haibin agent: `http://localhost:4000`
 - authority (protected signer): `http://localhost:4002`
 - mock service agent: `http://localhost:4001`
+- approver (human-approval boundary; host loopback only): `http://127.0.0.1:4003`
 
 Open:
 
@@ -290,7 +304,7 @@ To remove dependency volumes as well:
 docker compose down -v
 ```
 
-`down -v` also deletes the `authority_data` volume, i.e. **all durable authority state** (budgets, invocation history, receipts). Use plain `docker compose down` to keep it.
+`down -v` also deletes the `authority_data` volume, i.e. **all durable authority state** (budgets, invocation history, receipts), and the `approver_keys` / `issuer_trust` volumes (the issuer key and approval code; a new issuer is created on next start). Use plain `docker compose down` to keep them.
 
 ### Validate inside Docker
 
@@ -334,6 +348,8 @@ Those areas are deliberately outside the current hackathon critical path.
 - [Claude Code engineering instructions](CLAUDE.md)
 - [Claude Code Phase 1 handoff](docs/claude-handoff.md)
 - [Docker-first development](docs/docker-development.md)
+- [x402 settlement on the Pay.sh Solana Payment Sandbox](docs/payments-x402-sandbox.md)
+- [Human approval boundary and semantic operation authorization](docs/human-approval-and-semantic-authorization.md)
 
 ## Security
 

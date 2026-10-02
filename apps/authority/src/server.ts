@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { validateAuthorizationRequest } from "@virtual-haibin/mandate";
+import { validateAuthorizationRequestV2 } from "@virtual-haibin/mandate";
 import { AuthorityRequestError, type AuthorityService } from "./authorize.js";
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -119,7 +119,8 @@ export function createAuthorityServer(options: AuthorityServerOptions): Server {
           throw new HttpInputError("permit is required.", 400);
         }
 
-        const validation = validateAuthorizationRequest(body.authorizationRequest);
+        // AuthorizationRequest v2 only: every paid call must name its exact operation.
+        const validation = validateAuthorizationRequestV2(body.authorizationRequest);
 
         if (!validation.valid) {
           throw new HttpInputError(validation.message, 400);

@@ -7,12 +7,14 @@
  * units. No provider converts decimals or display prices.
  */
 
+import type { PaidRequest } from "./paid-request.js";
+
 /** A paid HTTP resource from the authority's trusted registry (never agent/service supplied). */
 export type PaidResource = {
   serviceId: string;
   capability: string;
   url: string;
-  method: "GET";
+  method: "POST";
 };
 
 /**
@@ -47,6 +49,8 @@ export type ChallengeRejectionCode =
 export type PaymentChallenge = {
   kind: "challenge";
   requirements: PaymentRequirement[];
+  /** Digest of the exact PaidRequest that produced this challenge; execute() pays only for that request. */
+  requestSha256: string;
   /** Provider-private decoded challenge, needed to build the credential. Never persisted or logged. */
   raw: unknown;
 };
@@ -75,6 +79,8 @@ export type PaymentAttempt = {
   blockhash: string;
   lastValidBlockHeight: string;
   resourceUrl: string;
+  /** Digest of the exact HTTP request (method, URL, body) this payment pays for. */
+  requestSha256: string;
   preparedAt: number;
 };
 
@@ -108,7 +114,8 @@ export type SettlementLookup =
   | { status: "inconclusive"; detail: string };
 
 export type ExecuteInput = {
-  resource: PaidResource;
+  /** Must be the same request (same digest) the challenge was fetched with. */
+  request: PaidRequest;
   challenge: PaymentChallenge;
   requirement: PaymentRequirement;
   /** Correlation id sent to the service (the invocationId). */
@@ -123,12 +130,14 @@ export interface PaymentProvider {
   /** Public address of the payment wallet (never the key). */
   readonly payerAddress: string;
 
-  /** Unpaid request to the resource; returns the parsed challenge. Signs nothing. */
-  fetchChallenge(resource: PaidResource, context: { reference: string }): Promise<ChallengeResult>;
+  /** Sends `request` unpaid; returns the parsed challenge bound to the request digest. Signs nothing. */
+  fetchChallenge(request: PaidRequest, context: { reference: string }): Promise<ChallengeResult>;
 
   /**
    * Builds, checks and transmits the payment credential for exactly
-   * `requirement`, then confirms settlement independently.
+   * `requirement`, attached to exactly `request`, then confirms settlement
+   * independently. Refuses (PaymentNotSubmittedError, nothing transmitted)
+   * if `request` is not the request the challenge was fetched for.
    *
    * ORDERING CONTRACT (relied on by crash recovery): the credential must not
    * be transmitted, and no transaction bytes may leave the provider, until

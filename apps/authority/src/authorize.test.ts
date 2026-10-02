@@ -14,7 +14,7 @@ import {
   type AuthorityLogEntry,
   type AuthorityServiceOptions,
 } from "./authorize.js";
-import { AUTHORIZATION_RECEIPT_DOMAIN, type SignedAuthorizationReceiptV1 } from "./receipt.js";
+import { AUTHORIZATION_RECEIPT_DOMAIN, type SignedAuthorizationReceipt } from "./receipt.js";
 import { SqliteAuthorityStore } from "./store/sqlite-store.js";
 import {
   agentAddress,
@@ -466,7 +466,9 @@ test("the payment signer receives exactly the validated challenge requirement, i
   assert.equal(provider.calls.length, 1);
   const [execution] = provider.calls;
   assert.equal(execution?.reference, "inv-payment-facts-1");
-  assert.deepEqual(execution?.resource, TEST_RESOURCE);
+  assert.equal(execution?.request.url, TEST_RESOURCE.url);
+  assert.equal(execution?.request.method, "POST");
+  assert.equal(execution?.request.body, '{"datasetId":"dataset-a","operation":"summarize"}');
   assert.equal(execution?.requirement.scheme, "exact");
   assert.equal(execution?.requirement.network, TEST_CHALLENGE_NETWORK);
   assert.equal(execution?.requirement.asset, permit.mint);
@@ -501,9 +503,9 @@ test("receipts are signed by the authority key and fail verification if a field 
   const permit = await buildSignedPermit();
   const { receipt } = await service.authorize(await signedInput(permit, { invocationId: "inv-receipt-sig-1" }));
 
-  async function verifyReceipt(candidate: SignedAuthorizationReceiptV1): Promise<boolean> {
+  async function verifyReceipt(candidate: SignedAuthorizationReceipt): Promise<boolean> {
     const { signature, ...unsigned } = candidate;
-    const bytes = new TextEncoder().encode(`${AUTHORIZATION_RECEIPT_DOMAIN}:v1\n${canonicalize(unsigned)}`);
+    const bytes = new TextEncoder().encode(`${AUTHORIZATION_RECEIPT_DOMAIN}:v${candidate.version}\n${canonicalize(unsigned)}`);
     const publicKey = await getPublicKeyFromAddress(address(candidate.authority));
     return verifySignature(publicKey, signatureBytes(getBase58Encoder().encode(signature.signature)), bytes);
   }
@@ -512,6 +514,13 @@ test("receipts are signed by the authority key and fail verification if a field 
   assert.equal(await verifyReceipt({ ...receipt, amountAtomic: "20000" }), false);
   assert.equal(await verifyReceipt({ ...receipt, recipient: otherRecipientAddress }), false);
   assert.equal(await verifyReceipt({ ...receipt, requestFingerprint: "0".repeat(64) }), false);
+
+  // v2 receipts also bind the exact operation the decision was about.
+  assert.equal(receipt.version, 2);
+  if (receipt.version === 2) {
+    assert.equal(await verifyReceipt({ ...receipt, operation: { ...receipt.operation, operation: "export" } }), false);
+    assert.equal(await verifyReceipt({ ...receipt, operationDigest: "0".repeat(64) }), false);
+  }
 });
 
 test("signing keys are non-extractable and never appear in logs or results", async () => {

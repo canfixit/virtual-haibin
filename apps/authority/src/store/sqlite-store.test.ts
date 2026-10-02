@@ -7,8 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import {
   AUTHORIZATION_REQUEST_PROTOCOL,
-  AUTHORIZATION_REQUEST_VERSION,
-  type AuthorizationRequestV1,
+  AUTHORIZATION_REQUEST_VERSION_2,
+  type AuthorizationRequestV2,
 } from "@virtual-haibin/mandate";
 import type { SignedAuthorizationReceiptV1 } from "../receipt.js";
 import { SQLITE_SCHEMA_VERSION, SqliteAuthorityStore } from "./sqlite-store.js";
@@ -28,21 +28,22 @@ function tempDbPath(): string {
 
 const ISSUER = "Issuer1111111111111111111111111111111111111";
 
-function request(invocationId: string, amountAtomic: string): AuthorizationRequestV1 {
+function request(invocationId: string, amountAtomic: string): AuthorizationRequestV2 {
   return {
     protocol: AUTHORIZATION_REQUEST_PROTOCOL,
-    version: AUTHORIZATION_REQUEST_VERSION,
+    version: AUTHORIZATION_REQUEST_VERSION_2,
     audience: "test-authority",
     grantId: "grant-1",
     permitDigest: "a".repeat(64),
     invocationId,
-    service: "mock-research-agent",
-    capability: "research.summary",
+    service: "mock-dataset-reports",
+    capability: "reports.generate",
     network: "devnet",
     mint: "Mint111111111111111111111111111111111111111",
     recipient: "Recipient11111111111111111111111111111111111",
     amountAtomic,
     issuedAt: 1,
+    operation: { method: "POST", resource: "/api/v1/report", operation: "summarize", datasetId: "dataset-a" },
   };
 }
 
@@ -80,8 +81,8 @@ function fakeReceipt(invocationId: string, decision: "ALLOW" | "DENY"): SignedAu
     agent: "Agent1111111111111111111111111111111111111",
     permitDigest: "a".repeat(64),
     requestFingerprint: "b".repeat(64),
-    service: "mock-research-agent",
-    capability: "research.summary",
+    service: "mock-dataset-reports",
+    capability: "reports.generate",
     network: "devnet",
     mint: "Mint111111111111111111111111111111111111111",
     recipient: "Recipient11111111111111111111111111111111111",
@@ -366,7 +367,8 @@ test("startup recovery: RESERVED with an attempt -> RECONCILIATION_REQUIRED, wit
     amountAtomic: "10000",
     blockhash: "SURFNETxSAFEHASHxxxxxxxxxxxxxxxxxxx1ace1111",
     lastValidBlockHeight: "1000",
-    resourceUrl: "http://paid.test/api/v1/research",
+    resourceUrl: "http://paid.test/api/v1/report",
+    requestSha256: "c".repeat(64),
     preparedAt: 1,
   });
   await store.reserve(reserveInput("inv-unsent", "10000"), allowAll);
@@ -482,7 +484,8 @@ function attemptFor(invocationId: string, amountAtomic = "20000") {
     amountAtomic,
     blockhash: "SURFNETxSAFEHASHxxxxxxxxxxxxxxxxxxx1ace1111",
     lastValidBlockHeight: "1000",
-    resourceUrl: "http://paid.test/api/v1/research",
+    resourceUrl: "http://paid.test/api/v1/report",
+    requestSha256: "c".repeat(64),
     preparedAt: 1,
   };
 }

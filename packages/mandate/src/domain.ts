@@ -7,6 +7,12 @@
  */
 export const PURCHASE_PERMIT_DOMAIN = "virtual-haibin/purchase-permit";
 export const PURCHASE_PERMIT_VERSION = 1;
+/**
+ * v2 (Phase 4.5) adds a signed `operation` (see operation.ts): the exact
+ * business operation and arguments the human approved. v1 semantics are
+ * unchanged; a v1 signature never verifies as v2 (different domain prefix).
+ */
+export const PURCHASE_PERMIT_VERSION_2 = 2;
 
 /**
  * Settlement environments a permit may authorize. These are Virtual Haibin

@@ -1,4 +1,5 @@
-import type { PURCHASE_PERMIT_DOMAIN, PURCHASE_PERMIT_VERSION, SupportedNetwork } from "./domain.js";
+import type { PURCHASE_PERMIT_DOMAIN, PURCHASE_PERMIT_VERSION, PURCHASE_PERMIT_VERSION_2, SupportedNetwork } from "./domain.js";
+import type { ExactOperationV1 } from "./operation.js";
 
 /**
  * Stable machine-readable reason codes for permit validation/verification
@@ -20,6 +21,7 @@ export type PermitReasonCode =
   | "INVALID_AMOUNT"
   | "INVALID_TIME_RANGE"
   | "INVALID_SUBDELEGATION"
+  | "INVALID_OPERATION"
   | "INVALID_SIGNATURE";
 
 /**
@@ -55,6 +57,17 @@ export type UnsignedPurchasePermitV1 = {
   subdelegation: false;
 };
 
+/**
+ * PurchasePermit v2: every v1 field with unchanged meaning, plus the exact
+ * business operation the human approved. A new version (not a mutated v1)
+ * because `operation` narrows what the permit authorizes and must be signed.
+ */
+export type UnsignedPurchasePermitV2 = Omit<UnsignedPurchasePermitV1, "version"> & {
+  version: typeof PURCHASE_PERMIT_VERSION_2;
+  /** The exact operation (method, resource, action, dataset) the human approved. Signed. */
+  operation: ExactOperationV1;
+};
+
 export type PermitSignature = {
   algorithm: "ed25519";
   /** Base58-encoded 64-byte Ed25519 detached signature. */
@@ -65,9 +78,13 @@ export type SignedPurchasePermitV1 = UnsignedPurchasePermitV1 & {
   signature: PermitSignature;
 };
 
-export type PermitValidationSuccess = {
+export type SignedPurchasePermitV2 = UnsignedPurchasePermitV2 & {
+  signature: PermitSignature;
+};
+
+export type PermitValidationSuccess<P = UnsignedPurchasePermitV1> = {
   valid: true;
-  permit: UnsignedPurchasePermitV1;
+  permit: P;
 };
 
 export type PermitValidationFailure = {
@@ -76,11 +93,11 @@ export type PermitValidationFailure = {
   message: string;
 };
 
-export type PermitValidationResult = PermitValidationSuccess | PermitValidationFailure;
+export type PermitValidationResult<P = UnsignedPurchasePermitV1> = PermitValidationSuccess<P> | PermitValidationFailure;
 
-export type PermitVerificationSuccess = {
+export type PermitVerificationSuccess<P = SignedPurchasePermitV1> = {
   verified: true;
-  permit: SignedPurchasePermitV1;
+  permit: P;
 };
 
 export type PermitVerificationFailure = {
@@ -89,4 +106,4 @@ export type PermitVerificationFailure = {
   message: string;
 };
 
-export type PermitVerificationResult = PermitVerificationSuccess | PermitVerificationFailure;
+export type PermitVerificationResult<P = SignedPurchasePermitV1> = PermitVerificationSuccess<P> | PermitVerificationFailure;

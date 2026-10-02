@@ -1,7 +1,14 @@
 import { isAddress } from "@solana/addresses";
-import { PURCHASE_PERMIT_DOMAIN, PURCHASE_PERMIT_VERSION, SUPPORTED_NETWORKS } from "./domain.js";
+import { PURCHASE_PERMIT_DOMAIN, PURCHASE_PERMIT_VERSION, PURCHASE_PERMIT_VERSION_2, SUPPORTED_NETWORKS } from "./domain.js";
 import type { SupportedNetwork } from "./domain.js";
-import type { PermitReasonCode, PermitValidationResult, UnsignedPurchasePermitV1 } from "./types.js";
+import { validateExactOperation } from "./operation.js";
+import type {
+  PermitReasonCode,
+  PermitValidationFailure,
+  PermitValidationResult,
+  UnsignedPurchasePermitV1,
+  UnsignedPurchasePermitV2,
+} from "./types.js";
 
 const GRANT_ID_PATTERN = /^[A-Za-z0-9_.-]{1,128}$/;
 const SERVICE_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -13,9 +20,12 @@ const ATOMIC_AMOUNT_PATTERN = /^(0|[1-9][0-9]{0,19})$/;
 /** SPL token amounts are u64; reject anything that could not fit on-chain. */
 const MAX_ATOMIC_AMOUNT = 18446744073709551615n;
 
-function fail(reasonCode: PermitReasonCode, message: string): PermitValidationResult {
+function fail(reasonCode: PermitReasonCode, message: string): PermitValidationFailure {
   return { valid: false, reasonCode, message };
 }
+
+/** The fields PurchasePermit v1 and v2 share, with identical meaning and validation. */
+type SharedPermitFields = Omit<UnsignedPurchasePermitV1, "version">;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -54,6 +64,47 @@ export function validateUnsignedPurchasePermit(candidate: unknown): PermitValida
     return fail("UNSUPPORTED_VERSION", `Unsupported purchase permit version: ${JSON.stringify(candidate.version)}.`);
   }
 
+  const shared = validateSharedFields(candidate);
+
+  if ("valid" in shared) {
+    return shared;
+  }
+
+  return { valid: true, permit: { version: PURCHASE_PERMIT_VERSION, ...shared } };
+}
+
+/**
+ * Validates a PurchasePermit v2 candidate: every v1 field with identical
+ * rules, plus a strictly validated `operation`. Like v1, unknown top-level
+ * properties are never copied (so they are neither signed nor read); unknown
+ * properties *inside* `operation` are rejected, because that object carries
+ * the business arguments.
+ */
+export function validateUnsignedPurchasePermitV2(candidate: unknown): PermitValidationResult<UnsignedPurchasePermitV2> {
+  if (!isPlainObject(candidate)) {
+    return fail("INVALID_SCHEMA", "Purchase permit must be a JSON object.");
+  }
+
+  if (candidate.version !== PURCHASE_PERMIT_VERSION_2) {
+    return fail("UNSUPPORTED_VERSION", `Unsupported purchase permit version: ${JSON.stringify(candidate.version)}.`);
+  }
+
+  const shared = validateSharedFields(candidate);
+
+  if ("valid" in shared) {
+    return shared;
+  }
+
+  const operation = validateExactOperation(candidate.operation);
+
+  if (!operation.valid) {
+    return fail("INVALID_OPERATION", operation.message);
+  }
+
+  return { valid: true, permit: { version: PURCHASE_PERMIT_VERSION_2, ...shared, operation: operation.operation } };
+}
+
+function validateSharedFields(candidate: Record<string, unknown>): SharedPermitFields | PermitValidationFailure {
   if (candidate.domain !== PURCHASE_PERMIT_DOMAIN) {
     return fail("INVALID_DOMAIN", "Purchase permit domain does not match the expected Virtual Haibin domain.");
   }
@@ -129,11 +180,10 @@ export function validateUnsignedPurchasePermit(candidate: unknown): PermitValida
   }
 
   if (candidate.subdelegation !== false) {
-    return fail("INVALID_SUBDELEGATION", "subdelegation must be false in purchase permit v1.");
+    return fail("INVALID_SUBDELEGATION", "subdelegation must be false in purchase permits v1 and v2.");
   }
 
-  const permit: UnsignedPurchasePermitV1 = {
-    version: PURCHASE_PERMIT_VERSION,
+  return {
     domain: PURCHASE_PERMIT_DOMAIN,
     grantId: candidate.grantId,
     issuer: candidate.issuer,
@@ -149,6 +199,4 @@ export function validateUnsignedPurchasePermit(candidate: unknown): PermitValida
     expiresAt: candidate.expiresAt,
     subdelegation: false,
   };
-
-  return { valid: true, permit };
 }

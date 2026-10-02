@@ -1,5 +1,12 @@
-import type { AuthorizationRequestV1 } from "@virtual-haibin/mandate";
-import type { ChallengeResult, PaidResource, PaymentRequirement, SettlementProfile } from "@virtual-haibin/payments";
+import { operationRequestBody, type AuthorizationRequestV2, type ExactOperationV1 } from "@virtual-haibin/mandate";
+import {
+  createPaidRequest,
+  type ChallengeResult,
+  type PaidRequest,
+  type PaidResource,
+  type PaymentRequirement,
+  type SettlementProfile,
+} from "@virtual-haibin/payments";
 
 /**
  * Trusted registry of paid resources, keyed by (serviceId, capability).
@@ -26,10 +33,33 @@ export function createPaidServiceRegistry(resources: readonly PaidResource[]): P
       throw new Error(`Paid resource ${resource.url} must not embed credentials.`);
     }
 
+    if (url.search || url.hash) {
+      throw new Error(`Paid resource ${resource.url} must not carry a query or fragment; the operation travels in the body.`);
+    }
+
     registry.set(paidServiceKey(resource.serviceId, resource.capability), Object.freeze({ ...resource, url: url.toString() }));
   }
 
   return registry;
+}
+
+/**
+ * Builds the exact outbound HTTP request for a verified operation: the
+ * trusted registry URL, the operation's method, and a body derived only
+ * from the operation's fields (see operationRequestBody). Returns null if
+ * the configured resource does not serve this method/path -- the authority
+ * never invents a URL from the operation.
+ *
+ * Pure and deterministic: called once to build the request, and again from
+ * the durably stored, authenticated request right before payment to prove
+ * the request about to be paid for is still that operation.
+ */
+export function buildPaidRequest(resource: PaidResource, operation: ExactOperationV1): PaidRequest | null {
+  if (resource.method !== operation.method || new URL(resource.url).pathname !== operation.resource) {
+    return null;
+  }
+
+  return createPaidRequest({ url: resource.url, method: operation.method, body: operationRequestBody(operation) });
 }
 
 export type ChallengeReasonCode =
@@ -64,8 +94,9 @@ export function selectAndValidateChallenge(
   challenge: ChallengeResult,
   context: {
     profile: SettlementProfile;
-    resource: PaidResource;
-    request: AuthorizationRequestV1;
+    /** The exact request the challenge was fetched with. */
+    paidRequest: PaidRequest;
+    request: AuthorizationRequestV2;
     payerAddress: string;
   },
 ): ChallengeSelection {
@@ -73,7 +104,7 @@ export function selectAndValidateChallenge(
     return { requirement: null, reasonCodes: [challenge.reasonCode] };
   }
 
-  const { profile, resource, request, payerAddress } = context;
+  const { profile, paidRequest, request, payerAddress } = context;
   const sameScheme = challenge.requirements.filter((candidate) => candidate.scheme === profile.scheme);
   const candidates = sameScheme.filter((candidate) => profile.acceptedChallengeNetworks.includes(candidate.network));
   const requirement = candidates[0];
@@ -95,7 +126,7 @@ export function selectAndValidateChallenge(
     reasonCodes.push("ASSET_NOT_ALLOWED");
   }
 
-  if (requirement.resourceUrl !== resource.url) {
+  if (requirement.resourceUrl !== paidRequest.url || challenge.requestSha256 !== paidRequest.sha256) {
     reasonCodes.push("CHALLENGE_RESOURCE_MISMATCH");
   }
 

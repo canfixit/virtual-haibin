@@ -2,13 +2,14 @@ import { getAddressFromPublicKey } from "@solana/addresses";
 import { generateKeyPair } from "@solana/keys";
 import {
   AUTHORIZATION_REQUEST_PROTOCOL,
-  AUTHORIZATION_REQUEST_VERSION,
+  AUTHORIZATION_REQUEST_VERSION_2,
   computePermitDigest,
   signAuthorizationRequest,
-  signPurchasePermit,
-  type AuthorizationRequestV1,
-  type SignedPurchasePermitV1,
-  type UnsignedPurchasePermitV1,
+  signPurchasePermitV2,
+  type AuthorizationRequestV2,
+  type ExactOperationV1,
+  type SignedPurchasePermitV2,
+  type UnsignedPurchasePermitV2,
 } from "@virtual-haibin/mandate";
 import {
   MockPaymentProvider,
@@ -16,7 +17,7 @@ import {
   type PaidResource,
   type SettlementProfile,
 } from "@virtual-haibin/payments";
-import type { AuthorityService, AuthorizeRequestInput } from "./authorize.js";
+import type { AuthorityService, AuthorizeRequestInput, IssuerEntitlement } from "./authorize.js";
 import { createPaidServiceRegistry } from "./payment-challenge.js";
 
 // Test-only fixtures. All keys are generated per test run; none are persisted.
@@ -25,8 +26,12 @@ export const TEST_AUDIENCE = "test-authority";
 
 export const authoritySigner = await generateKeyPair();
 export const authorityAddress = await getAddressFromPublicKey(authoritySigner.publicKey);
+/** The trusted human issuer (stands in for apps/approver's key). */
 export const issuerKeypair = await generateKeyPair();
 export const issuerAddress = await getAddressFromPublicKey(issuerKeypair.publicKey);
+/** A key anyone (including the agent) could generate: produces valid signatures, but is not entitled. */
+export const rogueIssuerKeypair = await generateKeyPair();
+export const rogueIssuerAddress = await getAddressFromPublicKey(rogueIssuerKeypair.publicKey);
 /** The permit's authorizedAgent identity key (non-spending). */
 export const agentIdentity = await generateKeyPair();
 export const agentAddress = await getAddressFromPublicKey(agentIdentity.publicKey);
@@ -53,16 +58,30 @@ export const TEST_PROFILE: SettlementProfile = Object.freeze({
 } satisfies SettlementProfile);
 
 export const TEST_RESOURCE: PaidResource = {
-  serviceId: "mock-research-agent",
-  capability: "research.summary",
-  url: "http://paid.test/api/v1/research",
-  method: "GET",
+  serviceId: "mock-dataset-reports",
+  capability: "reports.generate",
+  url: "http://paid.test/api/v1/report",
+  method: "POST",
 };
 
-/** Paid-service registry + settlement profiles for AuthorityService options. */
+/** The operation the test human approves. */
+export const APPROVED_OPERATION: ExactOperationV1 = Object.freeze({
+  method: "POST",
+  resource: "/api/v1/report",
+  operation: "summarize",
+  datasetId: "dataset-a",
+});
+
+export const TEST_ISSUER_ENTITLEMENT: IssuerEntitlement = Object.freeze({
+  issuer: issuerAddress,
+  settlementProfiles: [TEST_PROFILE.permitNetwork],
+});
+
+/** Paid-service registry, settlement profiles and the issuer trust root for AuthorityService options. */
 export const TEST_PAYMENT_CONFIG = {
   paidServices: createPaidServiceRegistry([TEST_RESOURCE]),
   settlementProfiles: new Map([[TEST_PROFILE.permitNetwork, TEST_PROFILE]]),
+  issuerEntitlement: TEST_ISSUER_ENTITLEMENT,
 };
 
 /**
@@ -104,17 +123,17 @@ export class TimingOutPaymentProvider extends CountingPaymentProvider {
   }
 }
 
-export function buildUnsignedPermit(overrides: Partial<UnsignedPurchasePermitV1> = {}): UnsignedPurchasePermitV1 {
+export function buildUnsignedPermit(overrides: Partial<UnsignedPurchasePermitV2> = {}): UnsignedPurchasePermitV2 {
   const issuedAt = Date.now();
 
   return {
-    version: 1,
+    version: 2,
     domain: "virtual-haibin/purchase-permit",
     grantId: `VH-GRANT-${Math.random().toString(36).slice(2)}`,
     issuer: issuerAddress,
     authorizedAgent: agentAddress,
-    service: "mock-research-agent",
-    capability: "research.summary",
+    service: TEST_RESOURCE.serviceId,
+    capability: TEST_RESOURCE.capability,
     network: "solana-payment-sandbox",
     mint: mintAddress,
     recipient: recipientAddress,
@@ -123,28 +142,34 @@ export function buildUnsignedPermit(overrides: Partial<UnsignedPurchasePermitV1>
     issuedAt,
     expiresAt: issuedAt + 30 * 60 * 1000,
     subdelegation: false,
+    operation: { ...APPROVED_OPERATION },
     ...overrides,
   };
 }
 
-export async function buildSignedPermit(overrides: Partial<UnsignedPurchasePermitV1> = {}): Promise<SignedPurchasePermitV1> {
-  return signPurchasePermit(buildUnsignedPermit(overrides), issuerKeypair);
+/** Signs with the trusted issuer, or with `signer` (whose address becomes the issuer). */
+export async function buildSignedPermit(
+  overrides: Partial<UnsignedPurchasePermitV2> = {},
+  signer: CryptoKeyPair = issuerKeypair,
+): Promise<SignedPurchasePermitV2> {
+  const issuer = await getAddressFromPublicKey(signer.publicKey);
+  return signPurchasePermitV2(buildUnsignedPermit({ issuer, ...overrides }), signer);
 }
 
 export type SignedInputOptions = {
   invocationId: string;
   amountAtomic?: string;
   /** Overrides applied *before* signing (an honest agent asking for these values). */
-  fields?: Partial<AuthorizationRequestV1>;
+  fields?: Partial<AuthorizationRequestV2>;
   /** Signing identity; defaults to the permit's authorized agent. */
   agent?: CryptoKeyPair;
 };
 
 /** Builds an authorization request for `permit` and signs it like the agent does. */
-export async function signedInput(permit: SignedPurchasePermitV1, options: SignedInputOptions): Promise<AuthorizeRequestInput> {
-  const authorizationRequest: AuthorizationRequestV1 = {
+export async function signedInput(permit: SignedPurchasePermitV2, options: SignedInputOptions): Promise<AuthorizeRequestInput> {
+  const authorizationRequest: AuthorizationRequestV2 = {
     protocol: AUTHORIZATION_REQUEST_PROTOCOL,
-    version: AUTHORIZATION_REQUEST_VERSION,
+    version: AUTHORIZATION_REQUEST_VERSION_2,
     audience: TEST_AUDIENCE,
     grantId: permit.grantId,
     permitDigest: await computePermitDigest(permit),
@@ -156,6 +181,7 @@ export async function signedInput(permit: SignedPurchasePermitV1, options: Signe
     recipient: permit.recipient,
     amountAtomic: options.amountAtomic ?? "10000",
     issuedAt: Date.now(),
+    operation: { ...APPROVED_OPERATION },
     ...options.fields,
   };
 
@@ -165,12 +191,12 @@ export async function signedInput(permit: SignedPurchasePermitV1, options: Signe
 }
 
 /** Modifies signed request fields *after* signing, as an attacker in transit would. */
-export function tamperRequest(input: AuthorizeRequestInput, fields: Partial<AuthorizationRequestV1>): AuthorizeRequestInput {
+export function tamperRequest(input: AuthorizeRequestInput, fields: Partial<AuthorizationRequestV2>): AuthorizeRequestInput {
   return { ...input, authorizationRequest: { ...input.authorizationRequest, ...fields } };
 }
 
 /** Durable committed (reserved + consumed) total for a permit's grant, as a string. */
-export async function committedAtomic(service: AuthorityService, permit: SignedPurchasePermitV1): Promise<string> {
+export async function committedAtomic(service: AuthorityService, permit: SignedPurchasePermitV2): Promise<string> {
   const budget = await service.getGrantBudget(permit.issuer, permit.grantId);
   return budget === null ? "0" : (BigInt(budget.reservedAtomic) + BigInt(budget.consumedAtomic)).toString();
 }

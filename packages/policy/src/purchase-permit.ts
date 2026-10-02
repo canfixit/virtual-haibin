@@ -1,5 +1,14 @@
 import type { SignedPurchasePermitV1 } from "@virtual-haibin/mandate";
 
+/**
+ * The permit terms this evaluator reads. Identical in PurchasePermit v1 and
+ * v2; v2's additional `operation` is compared by evaluateExactOperation.
+ */
+export type PurchasePermitTerms = Pick<
+  SignedPurchasePermitV1,
+  "service" | "capability" | "network" | "mint" | "recipient" | "maxPerCallAtomic" | "maxTotalAtomic" | "expiresAt"
+>;
+
 export type PurchaseRequestV1 = {
   service: string;
   capability: string;
@@ -52,7 +61,7 @@ function isCanonicalAtomicAmount(value: string): boolean {
  * cryptographic signature.
  */
 export function evaluatePurchasePermit(
-  permit: SignedPurchasePermitV1,
+  permit: PurchasePermitTerms,
   request: PurchaseRequestV1,
 ): PurchasePermitDecision {
   const now = request.now ?? Date.now();

@@ -41,7 +41,7 @@ Sandbox transactions are sandbox transactions. They are never described as mainn
 
 | Key | Holder | Signs | Never |
 |---|---|---|---|
-| Permit issuer (human) | issuer (simulated in the agent process at demo startup) | PurchasePermit | payments |
+| Permit issuer (human) | `apps/approver` only (seed in the approver-only `approver_keys` volume; see [human-approval-and-semantic-authorization.md](human-approval-and-semantic-authorization.md)) | PurchasePermit v2 | payments |
 | Agent identity | agent (ephemeral, non-extractable) | AuthorizationRequest | payments |
 | Authority receipt key | authority (ephemeral) | Virtual Haibin decision receipts | payments |
 | **Payment wallet** | **authority's payment provider only** (ephemeral, non-extractable, sandbox-funded) | the x402 `exact` transfer | leaves the provider, is logged, or is returned |
@@ -50,22 +50,22 @@ The agent, web app and paid service never receive the payment wallet key. There 
 
 ## Flow
 
-1. The agent signs an AuthorizationRequest (service, capability, network, mint, recipient, amount, invocation, permit digest, audience) with its identity key.
-2. The authority verifies the permit and the agent signature. A known invocation is replayed or rejected from durable state **without contacting the service**.
-3. If the signed request itself is not permitted, the request is denied without contacting the service.
-4. The authority calls the **registry URL** for (service, capability). This is trusted configuration, never agent- or challenge-supplied. Redirects are never followed and response sizes are bounded.
+1. The agent signs an AuthorizationRequest v2 (service, capability, network, mint, recipient, amount, invocation, permit digest, audience, and the exact operation) with its identity key.
+2. The authority verifies the permit, that its issuer is the pinned trusted issuer (`ISSUER_NOT_ENTITLED` otherwise), and the agent signature. A known invocation is replayed or rejected from durable state **without contacting the service**.
+3. If the signed request itself is not permitted, including an operation or argument the human did not approve, the request is denied without contacting the service.
+4. The authority builds the outbound request from the verified operation (`POST` + canonical JSON body) and sends it unpaid to the **registry URL** for (service, capability). The URL is trusted configuration, never agent- or challenge-supplied. Redirects are never followed and response sizes are bounded.
 5. The 402 `PAYMENT-REQUIRED` header is parsed with `x402HTTPClient`, then normalized strictly: x402 v2 only, canonical integer amount string, no floats.
 6. The challenge is validated against:
    - the profile: scheme `exact`, accepted network id, allowed asset;
-   - the configured resource: `resource.url` must match exactly;
+   - the configured resource: `resource.url` must match exactly, and the challenge must have been issued for the exact request digest the authority sent;
    - the fee payer: present, and not the payment wallet;
    - the signed request: asset, payTo and amount must match exactly.
 
    Then, inside one SQLite transaction, the permit policy is evaluated against both the signed request and the **challenge's own** values, including the per-call cap and `reserved + consumed + amount <= maxTotal`. Any failure means DENY, and the payment signer is never invoked.
 7. The budget is reserved in that same transaction, and the transaction is committed. No SQLite transaction is ever held open across HTTP or RPC calls.
-8. The provider fetches a sandbox blockhash, builds the credential with `ExactSvmScheme`, then decodes the signed transaction and checks it before it leaves. It must contain only compute-budget, a single `TransferChecked` and a memo, and it must use our blockhash, the challenge's fee payer, and the exact amount and mint from the payer's token account to payTo's token account.
-9. The payment attempt is written to durable state **before** transmission: payer, payer signature, blockhash, `lastValidBlockHeight`, and the payment facts.
-10. The credential is sent on the paid retry. The service's Pay Kit facilitator verifies it, co-signs as fee payer, and submits it.
+8. The authority re-derives the outbound request from the durably stored, authenticated request; it must be byte-identical (`OUTBOUND_REQUEST_MISMATCH` otherwise). The provider refuses to pay unless the request's digest equals the challenged request's digest. It then fetches a sandbox blockhash, builds the credential with `ExactSvmScheme`, then decodes the signed transaction and checks it before it leaves. It must contain only compute-budget, a single `TransferChecked` and a memo, and it must use our blockhash, the challenge's fee payer, and the exact amount and mint from the payer's token account to payTo's token account.
+9. The payment attempt is written to durable state **before** transmission: payer, payer signature, blockhash, `lastValidBlockHeight`, the request digest (`requestSha256`), and the payment facts.
+10. The credential is sent on the paid retry, with exactly the same method and body as the unpaid probe. The service's Pay Kit facilitator verifies it, co-signs as fee payer, and submits it.
 11. The facilitator's settlement report is treated as untrusted. The authority looks the transaction up on the **pinned RPC** by its own payer signature and checks every fact. Only then does it mark the invocation `CONFIRMED`: reserved becomes consumed, and the evidence and a bounded JSON result (plus its SHA-256) are stored.
 
 ## Failure classification

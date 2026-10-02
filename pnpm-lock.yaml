@@ -195,6 +195,22 @@ importers:
         specifier: 24.13.6
         version: 24.13.6
 
+  apps/approver:
+    dependencies:
+      '@solana/addresses':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+      '@solana/keys':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+      '@virtual-haibin/mandate':
+        specifier: workspace:*
+        version: link:../../packages/mandate
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.6
+        version: 24.13.6
+
   apps/authority:
     dependencies:
       '@solana/addresses':

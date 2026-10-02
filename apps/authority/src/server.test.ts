@@ -12,6 +12,7 @@ import {
   buildSignedPermit,
   CountingPaymentProvider,
   otherAgentIdentity,
+  rogueIssuerKeypair,
   signedInput,
   TEST_AUDIENCE,
   TEST_PAYMENT_CONFIG,
@@ -123,7 +124,8 @@ test("unexpected field types and extra fields in the signed request are rejected
   for (const change of [
     { amountAtomic: 10000 },
     { amountAtomic: "0.01" },
-    { version: 2 },
+    // AuthorizationRequest v1 (no operation) is no longer accepted on the wire.
+    { version: 1 },
     // A caller can never supply its own spend total.
     { alreadySpentAtomic: "0" },
   ]) {
@@ -284,4 +286,57 @@ test("POST /reconcile requires the bearer token and returns reconciliation repor
   const response = await fetch(`${baseUrl}/reconcile`, { method: "POST", headers: { authorization: `Bearer ${SHARED_SECRET}` } });
   assert.equal(response.status, 200);
   assert.ok(Array.isArray(((await response.json()) as { reports: unknown }).reports));
+});
+
+test("operation fields are validated strictly at the HTTP boundary (method, unknown args, enums)", async () => {
+  const permit = await buildSignedPermit();
+  const input = await signedInput(permit, { invocationId: "inv-http-op-1" });
+  const callsBefore = provider.calls.length;
+  const fetchesBefore = provider.challengesFetched.length;
+
+  for (const operation of [
+    { ...input.authorizationRequest.operation, method: "GET" },
+    { ...input.authorizationRequest.operation, format: "csv" },
+    { ...input.authorizationRequest.operation, operation: "delete" },
+    { ...input.authorizationRequest.operation, datasetId: "../dataset-a" },
+    null,
+  ]) {
+    const response = await postAuthorize({ ...input, authorizationRequest: { ...input.authorizationRequest, operation } });
+    assert.equal(response.status, 400, JSON.stringify(operation));
+  }
+
+  const { operation: _dropped, ...withoutOperation } = input.authorizationRequest;
+  assert.equal((await postAuthorize({ ...input, authorizationRequest: withoutOperation })).status, 400);
+  assert.equal(provider.calls.length, callsBefore);
+  assert.equal(provider.challengesFetched.length, fetchesBefore);
+});
+
+test("an untrusted issuer's validly signed permit is refused over HTTP with 403 ISSUER_NOT_ENTITLED", async () => {
+  const rogue = await buildSignedPermit({}, rogueIssuerKeypair);
+  const callsBefore = provider.calls.length;
+  const response = await postAuthorize(await signedInput(rogue, { invocationId: "inv-http-rogue-1" }));
+
+  assert.equal(response.status, 403);
+  assert.equal(await reasonCodeOf(response), "ISSUER_NOT_ENTITLED");
+  assert.equal(provider.calls.length, callsBefore);
+});
+
+test("same price, different operation over HTTP: summarize ALLOW, export DENY OPERATION_NOT_AUTHORIZED", async () => {
+  const permit = await buildSignedPermit();
+  const allow = await postAuthorize(await signedInput(permit, { invocationId: "inv-http-sum-1" }));
+  const callsAfterAllow = provider.calls.length;
+  const deny = await postAuthorize(
+    await signedInput(permit, {
+      invocationId: "inv-http-exp-1",
+      fields: { operation: { method: "POST", resource: "/api/v1/report", operation: "export", datasetId: "dataset-a" } },
+    }),
+  );
+
+  assert.equal(((await allow.json()) as { decision: string }).decision, "ALLOW");
+  const denied = (await deny.json()) as { decision: string; receipt: { reasonCodes: string[] }; payment: unknown };
+  assert.equal(deny.status, 200);
+  assert.equal(denied.decision, "DENY");
+  assert.deepEqual(denied.receipt.reasonCodes, ["OPERATION_NOT_AUTHORIZED"]);
+  assert.equal(denied.payment, null);
+  assert.equal(provider.calls.length, callsAfterAllow);
 });

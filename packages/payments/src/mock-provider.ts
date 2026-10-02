@@ -4,13 +4,13 @@ import {
   PaymentOutcomeUnknownError,
   type ChallengeResult,
   type ExecuteInput,
-  type PaidResource,
   type PaymentAttempt,
   type PaymentExecution,
   type PaymentProvider,
   type PaymentRequirement,
   type SettlementLookup,
 } from "./types.js";
+import { paidRequestMatches, type PaidRequest } from "./paid-request.js";
 
 /**
  * In-memory PaymentProvider for tests and local development without a
@@ -40,8 +40,8 @@ export type MockExecuteBehavior =
 export type MockPaymentProviderOptions = {
   settlementProfile?: string;
   payerAddress?: string;
-  /** Terms the "service" quotes for a resource/reference; may return a rejection or throw. */
-  challenge: (resource: PaidResource, reference: string) => MockChallengeTerms | ChallengeResult | "unavailable";
+  /** Terms the "service" quotes for a request/reference; may return a rejection or throw. */
+  challenge: (request: PaidRequest, reference: string) => MockChallengeTerms | ChallengeResult | "unavailable";
   behavior?: MockExecuteBehavior;
 };
 
@@ -51,7 +51,10 @@ export class MockPaymentProvider implements PaymentProvider {
   behavior: MockExecuteBehavior;
   /** Every execute() call (i.e. every time the payment signer would be invoked). */
   readonly executions: ExecuteInput[] = [];
-  readonly challengesFetched: Array<{ resource: PaidResource; reference: string }> = [];
+  /** Every unpaid probe, with the exact request the "service" received. */
+  readonly challengesFetched: Array<{ request: PaidRequest; reference: string }> = [];
+  /** Requests whose payment credential was "transmitted" (the paid retry the service received). */
+  readonly paidRequests: PaidRequest[] = [];
   /** Settled attempts, keyed by payer signature, for lookupSettlement. */
   readonly ledger = new Map<string, { transactionId: string; attempt: PaymentAttempt }>();
   /** Force lookupSettlement's answer for attempts not in the ledger. */
@@ -66,9 +69,9 @@ export class MockPaymentProvider implements PaymentProvider {
     this.#challenge = options.challenge;
   }
 
-  async fetchChallenge(resource: PaidResource, context: { reference: string }): Promise<ChallengeResult> {
-    this.challengesFetched.push({ resource, reference: context.reference });
-    const terms = this.#challenge(resource, context.reference);
+  async fetchChallenge(request: PaidRequest, context: { reference: string }): Promise<ChallengeResult> {
+    this.challengesFetched.push({ request, reference: context.reference });
+    const terms = this.#challenge(request, context.reference);
 
     if (terms === "unavailable") {
       throw new PaidServiceUnavailableError("mock service unavailable");
@@ -89,10 +92,10 @@ export class MockPaymentProvider implements PaymentProvider {
       amountAtomic: terms.amountAtomic,
       feePayer: terms.feePayer === undefined ? "MockFeePayer111111111111111111111111111111" : terms.feePayer,
       maxTimeoutSeconds: 300,
-      resourceUrl: terms.resourceUrl === undefined ? resource.url : terms.resourceUrl,
+      resourceUrl: terms.resourceUrl === undefined ? request.url : terms.resourceUrl,
     };
 
-    return { kind: "challenge", requirements: [requirement], raw: { mock: true } };
+    return { kind: "challenge", requirements: [requirement], requestSha256: request.sha256, raw: { mock: true } };
   }
 
   async execute(input: ExecuteInput): Promise<PaymentExecution> {
@@ -102,6 +105,11 @@ export class MockPaymentProvider implements PaymentProvider {
 
     if (this.behavior === "not_submitted") {
       throw new PaymentNotSubmittedError("mock: rejected before transmission");
+    }
+
+    // Same request-binding contract as the real provider.
+    if (!paidRequestMatches(input.request, input.challenge.requestSha256)) {
+      throw new PaymentNotSubmittedError("mock: paid request does not match the challenged request");
     }
 
     const attempt: PaymentAttempt = {
@@ -117,7 +125,8 @@ export class MockPaymentProvider implements PaymentProvider {
       amountAtomic: input.requirement.amountAtomic,
       blockhash: `mock-blockhash-${n}`,
       lastValidBlockHeight: "1000",
-      resourceUrl: input.resource.url,
+      resourceUrl: input.request.url,
+      requestSha256: input.request.sha256,
       preparedAt: Date.now(),
     };
 
@@ -126,6 +135,8 @@ export class MockPaymentProvider implements PaymentProvider {
     } catch (error) {
       throw new PaymentNotSubmittedError(`mock: attempt not persisted: ${error instanceof Error ? error.message : "unknown"}`);
     }
+
+    this.paidRequests.push(input.request);
 
     if (this.behavior === "hang") {
       return new Promise<PaymentExecution>(() => {});

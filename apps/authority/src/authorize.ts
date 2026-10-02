@@ -1,29 +1,32 @@
 import canonicalize from "canonicalize";
 import { InMemoryAuditLog } from "@virtual-haibin/audit";
 import {
+  computeOperationDigest,
   computePermitDigest,
   verifyAuthorizationRequestSignature,
-  verifyPurchasePermit,
-  type AuthorizationRequestV1,
-  type SignedPurchasePermitV1,
+  verifyPurchasePermitV2,
+  type AuthorizationRequestV2,
+  type SignedPurchasePermitV2,
 } from "@virtual-haibin/mandate";
 import {
   PaidServiceUnavailableError,
   PaymentNotSubmittedError,
-  type PaidResource,
+  type PaidRequest,
   type PaymentChallenge,
   type PaymentProvider,
   type PaymentRequirement,
   type SettlementProfile,
 } from "@virtual-haibin/payments";
-import { evaluatePurchasePermit } from "@virtual-haibin/policy";
+import { evaluateExactOperation, evaluatePurchasePermit } from "@virtual-haibin/policy";
 import {
   AUTHORIZATION_RECEIPT_DOMAIN,
   AUTHORIZATION_RECEIPT_VERSION,
+  AUTHORIZATION_RECEIPT_VERSION_2,
   signAuthorizationReceipt,
-  type SignedAuthorizationReceiptV1,
+  type SignedAuthorizationReceipt,
+  type UnsignedAuthorizationReceiptV1,
 } from "./receipt.js";
-import { paidServiceKey, selectAndValidateChallenge, type PaidServiceRegistry } from "./payment-challenge.js";
+import { buildPaidRequest, paidServiceKey, selectAndValidateChallenge, type PaidServiceRegistry } from "./payment-challenge.js";
 import {
   InvalidStateTransitionError,
   type AuthorityStore,
@@ -35,14 +38,14 @@ import {
 export type AuthorizeRequestInput = {
   /** Untrusted; verified with verifyPurchasePermit. */
   permit: unknown;
-  /** Structurally validated by the HTTP boundary; not yet authenticated. */
-  authorizationRequest: AuthorizationRequestV1;
+  /** Structurally validated (AuthorizationRequest v2) by the HTTP boundary; not yet authenticated. */
+  authorizationRequest: AuthorizationRequestV2;
   /** Untrusted; verified against permit.authorizedAgent. */
   agentSignature: unknown;
 };
 
 export type AuthorizeResult = {
-  receipt: SignedAuthorizationReceiptV1;
+  receipt: SignedAuthorizationReceipt;
   /** True when this invocationId was already decided (or in flight) with the same fingerprint; no new payment. */
   replay: boolean;
   /** Unsigned payment evidence from durable state (challenge terms, attempt, settlement). */
@@ -60,6 +63,8 @@ export type PaymentEvidence = {
   payTo: string | null;
   amountAtomic: string | null;
   resourceUrl: string | null;
+  /** Digest of the exact HTTP request (method, URL, body) that was paid for. */
+  requestSha256: string | null;
   payer: string | null;
   payerSignature: string | null;
   blockhash: string | null;
@@ -83,11 +88,26 @@ export type GrantBudget = {
 
 export type AuthorityLogEntry = { event: string } & Record<string, unknown>;
 
+/**
+ * Which human issuer may authorize spending from this authority's payment
+ * wallet, and on which settlement profiles. A valid permit signature only
+ * proves *who* signed; this pins *whose* signature counts. Single-issuer by
+ * design for the MVP -- not an issuer registry.
+ */
+export type IssuerEntitlement = {
+  /** Base58 Ed25519 public key of the trusted issuer (human approval boundary). */
+  issuer: string;
+  /** Settlement profile names (permit `network` values) this issuer may spend on. */
+  settlementProfiles: readonly string[];
+};
+
 export type AuthorityServiceOptions = {
   authoritySigner: CryptoKeyPair;
   authorityAddress: string;
   /** This authority's audience identifier; requests addressed elsewhere are rejected. */
   audience: string;
+  /** Trust root: the only issuer whose permits may spend from this authority. */
+  issuerEntitlement: IssuerEntitlement;
   paymentProvider: PaymentProvider;
   /** Trusted paid-resource registry; the only URLs the authority will call. */
   paidServices: PaidServiceRegistry;
@@ -108,6 +128,7 @@ export type AuthorityServiceOptions = {
 
 export type AuthorityReasonCode =
   | "PERMIT_INVALID"
+  | "ISSUER_NOT_ENTITLED"
   | "AGENT_SIGNATURE_MISSING"
   | "AGENT_SIGNATURE_INVALID"
   | "REQUEST_AUDIENCE_MISMATCH"
@@ -119,6 +140,7 @@ export type AuthorityReasonCode =
   | "GRANT_PERMIT_CONFLICT"
   | "PAYMENT_NOT_SUBMITTED"
   | "PAID_SERVICE_UNAVAILABLE"
+  | "OUTBOUND_REQUEST_MISMATCH"
   | "RECONCILIATION_REQUIRED";
 
 /** A request the authority refused before (or instead of) producing a decision receipt. */
@@ -142,6 +164,31 @@ export class AuthorityRequestError extends Error {
 export class AgentAuthenticationError extends AuthorityRequestError {
   constructor(reasonCode: AuthorityReasonCode, message: string, details: Record<string, unknown> = {}) {
     super(401, reasonCode, message, details);
+  }
+}
+
+/**
+ * The permit is cryptographically valid but signed by an issuer this
+ * authority does not trust to spend its payment wallet (or for a settlement
+ * profile outside that issuer's entitlement). Refused before any state is
+ * read or written: no reservation, no service contact, no payment signing.
+ */
+export class IssuerNotEntitledError extends AuthorityRequestError {
+  constructor(issuer: string) {
+    super(403, "ISSUER_NOT_ENTITLED", "The permit issuer is not entitled to authorize spending from this authority.", { issuer });
+  }
+}
+
+/**
+ * Defense in depth: the HTTP request about to be paid for no longer matches
+ * the operation durably recorded at authorization. Indicates a bug; the
+ * reservation is released and nothing is transmitted.
+ */
+export class OutboundRequestMismatchError extends AuthorityRequestError {
+  constructor(readonly invocationId: string) {
+    super(500, "OUTBOUND_REQUEST_MISMATCH", `Outbound request for invocation ${invocationId} does not match the authorized operation.`, {
+      invocationId,
+    });
   }
 }
 
@@ -223,8 +270,9 @@ export class ReconciliationRequiredError extends AuthorityRequestError {
 }
 
 type AuthenticatedRequest = {
-  permit: SignedPurchasePermitV1;
-  request: AuthorizationRequestV1;
+  permit: SignedPurchasePermitV2;
+  request: AuthorizationRequestV2;
+  operationDigest: string;
   fingerprint: string;
 };
 
@@ -239,13 +287,18 @@ async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
 
 /**
  * Deterministic identity of "what this invocation asks for": the exact
- * permit (by digest), the agent, and every payment-relevant field. The
- * signing timestamp and audience are deliberately excluded, so an honest
- * retry re-signed with a fresh timestamp is recognised as the same request.
+ * permit (by digest), the agent, every payment-relevant field and the exact
+ * business operation (by digest). The signing timestamp and audience are
+ * deliberately excluded, so an honest retry re-signed with a fresh timestamp
+ * is recognised as the same request.
  */
-async function computeRequestFingerprint(permit: SignedPurchasePermitV1, request: AuthorizationRequestV1): Promise<string> {
+async function computeRequestFingerprint(
+  permit: SignedPurchasePermitV2,
+  request: AuthorizationRequestV2,
+  operationDigest: string,
+): Promise<string> {
   const canonicalJson = canonicalize({
-    version: 1,
+    version: 2,
     permitDigest: request.permitDigest,
     grantId: permit.grantId,
     agent: permit.authorizedAgent,
@@ -256,13 +309,14 @@ async function computeRequestFingerprint(permit: SignedPurchasePermitV1, request
     mint: request.mint,
     recipient: request.recipient,
     amountAtomic: request.amountAtomic,
+    operationDigest,
   });
 
   if (canonicalJson === undefined) {
     throw new Error("Request fingerprint input cannot be canonicalized.");
   }
 
-  return sha256Hex(new TextEncoder().encode(`virtual-haibin/invocation-fingerprint:v1\n${canonicalJson}`));
+  return sha256Hex(new TextEncoder().encode(`virtual-haibin/invocation-fingerprint:v2\n${canonicalJson}`));
 }
 
 /**
@@ -280,6 +334,7 @@ export class AuthorityService {
   readonly #authoritySigner: CryptoKeyPair;
   readonly #authorityAddress: string;
   readonly #audience: string;
+  readonly #issuerEntitlement: IssuerEntitlement;
   readonly #paymentProvider: PaymentProvider;
   readonly #paidServices: PaidServiceRegistry;
   readonly #settlementProfiles: ReadonlyMap<string, SettlementProfile>;
@@ -297,6 +352,7 @@ export class AuthorityService {
     this.#authoritySigner = options.authoritySigner;
     this.#authorityAddress = options.authorityAddress;
     this.#audience = options.audience;
+    this.#issuerEntitlement = options.issuerEntitlement;
     this.#paymentProvider = options.paymentProvider;
     this.#paidServices = options.paidServices;
     this.#settlementProfiles = options.settlementProfiles;
@@ -382,9 +438,10 @@ export class AuthorityService {
   }
 
   /**
-   * Proves the caller is the permit's authorized agent and that the signed
-   * request is bound to this exact permit and this authority. A transport
-   * bearer token is never treated as this proof.
+   * Proves the permit comes from the entitled human issuer, that the caller
+   * is the permit's authorized agent, and that the signed request is bound
+   * to this exact permit and this authority. A transport bearer token is
+   * never treated as this proof. Nothing here reads or writes durable state.
    */
   async #authenticate(input: AuthorizeRequestInput): Promise<AuthenticatedRequest> {
     const request = input.authorizationRequest;
@@ -399,7 +456,9 @@ export class AuthorityService {
       reject("AGENT_SIGNATURE_MISSING", "agentSignature is required.");
     }
 
-    const verification = await verifyPurchasePermit(input.permit);
+    // PurchasePermit v2 only: a v1 permit binds no business operation, so it
+    // cannot authorize any paid call here (fails closed, UNSUPPORTED_VERSION).
+    const verification = await verifyPurchasePermitV2(input.permit);
 
     if (!verification.verified) {
       return reject("PERMIT_INVALID", `Purchase permit is invalid: ${verification.message}`, {
@@ -408,6 +467,20 @@ export class AuthorityService {
     }
 
     const permit = verification.permit;
+
+    // A valid signature is not entitlement: anyone can mint a key and sign a
+    // well-formed permit. Only the configured issuer may authorize spending
+    // from this authority's wallet, and only on its entitled profiles.
+    if (permit.issuer !== this.#issuerEntitlement.issuer || !this.#issuerEntitlement.settlementProfiles.includes(permit.network)) {
+      this.#log({
+        event: "authority.issuer_not_entitled",
+        reasonCode: "ISSUER_NOT_ENTITLED",
+        ...logContext,
+        issuer: permit.issuer,
+        network: permit.network,
+      });
+      throw new IssuerNotEntitledError(permit.issuer);
+    }
 
     // Verified against the permit's authorizedAgent: only the holder of that
     // identity key can produce this signature over these exact fields.
@@ -435,10 +508,11 @@ export class AuthorityService {
       reject("REQUEST_TIMESTAMP_OUT_OF_RANGE", "Authorization request timestamp is outside the accepted window.");
     }
 
-    return { permit, request, fingerprint: await computeRequestFingerprint(permit, request) };
+    const operationDigest = await computeOperationDigest(request.operation);
+    return { permit, request, operationDigest, fingerprint: await computeRequestFingerprint(permit, request, operationDigest) };
   }
 
-  async #process({ permit, request, fingerprint }: AuthenticatedRequest): Promise<AuthorizeResult> {
+  async #process({ permit, request, operationDigest, fingerprint }: AuthenticatedRequest): Promise<AuthorizeResult> {
     const { invocationId } = request;
 
     // Known invocation: replay/conflict/reconciliation straight from durable
@@ -450,8 +524,13 @@ export class AuthorityService {
     }
 
     const decidedAt = this.#now();
-    const policy = (values: { mint: string; recipient: string; amountAtomic: string }, committedAtomic: string) =>
-      evaluatePurchasePermit(permit, {
+    // The exact-operation check is independent of payment terms: two requests
+    // with identical amount/mint/recipient differ here only by what the human
+    // approved them to buy.
+    const operationCodes = evaluateExactOperation(permit.operation, request.operation).reasonCodes;
+    const policy = (values: { mint: string; recipient: string; amountAtomic: string }, committedAtomic: string) => [
+      ...operationCodes,
+      ...evaluatePurchasePermit(permit, {
         service: request.service,
         capability: request.capability,
         network: request.network,
@@ -460,30 +539,35 @@ export class AuthorityService {
         amountAtomic: values.amountAtomic,
         alreadySpentAtomic: committedAtomic,
         now: decidedAt,
-      });
+      }).reasonCodes,
+    ];
 
-    // 1. Is the *signed request itself* permitted (ignoring shared budget)?
-    //    If not, deny without contacting the service at all.
-    const requestCheck = policy({ mint: request.mint, recipient: request.recipient, amountAtomic: request.amountAtomic }, "0");
+    // 1. Is the *signed request itself* permitted -- including the exact
+    //    business operation -- ignoring shared budget? If not, deny without
+    //    contacting the service at all.
+    const requestAllowed = policy({ mint: request.mint, recipient: request.recipient, amountAtomic: request.amountAtomic }, "0").length === 0;
     let challenge: PaymentChallenge | null = null;
     let requirement: PaymentRequirement | null = null;
-    let resource: PaidResource | null = null;
+    let paidRequest: PaidRequest | null = null;
     const challengeCodes: string[] = [];
 
-    if (requestCheck.allowed) {
-      // 2. Obtain the real 402 challenge from the trusted registry URL.
+    if (requestAllowed) {
+      // 2. Build the outbound request from the verified operation (never from
+      //    agent-supplied bytes) and obtain the real 402 challenge for exactly
+      //    that request from the trusted registry URL.
       const profile = this.#settlementProfiles.get(permit.network);
-      resource = this.#paidServices.get(paidServiceKey(request.service, request.capability)) ?? null;
+      const resource = this.#paidServices.get(paidServiceKey(request.service, request.capability)) ?? null;
+      paidRequest = resource === null ? null : buildPaidRequest(resource, request.operation);
 
       if (!profile || profile.name !== this.#paymentProvider.settlementProfile) {
         challengeCodes.push("SETTLEMENT_PROFILE_UNAVAILABLE");
-      } else if (resource === null) {
+      } else if (paidRequest === null) {
         challengeCodes.push("PAID_SERVICE_NOT_CONFIGURED");
       } else {
         let result;
 
         try {
-          result = await this.#paymentProvider.fetchChallenge(resource, { reference: invocationId });
+          result = await this.#paymentProvider.fetchChallenge(paidRequest, { reference: invocationId });
         } catch (error) {
           if (error instanceof PaidServiceUnavailableError) {
             this.#log({ event: "authority.paid_service_unavailable", invocationId, error: error.message });
@@ -495,7 +579,7 @@ export class AuthorityService {
 
         const selection = selectAndValidateChallenge(result, {
           profile,
-          resource,
+          paidRequest,
           request,
           payerAddress: this.#paymentProvider.payerAddress,
         });
@@ -508,6 +592,9 @@ export class AuthorityService {
           event: "authority.challenge",
           invocationId,
           grantId: permit.grantId,
+          operation: request.operation.operation,
+          datasetId: request.operation.datasetId,
+          requestSha256: paidRequest.sha256,
           protocol: requirement?.protocol ?? null,
           scheme: requirement?.scheme ?? null,
           network: requirement?.network ?? null,
@@ -522,16 +609,14 @@ export class AuthorityService {
     // 3. One atomic decision against the durable budget: the signed request
     //    AND the real challenge terms must both be permitted.
     const evaluate = (committedAtomic: string): BudgetDecision => {
-      const codes = new Set<string>(
-        policy({ mint: request.mint, recipient: request.recipient, amountAtomic: request.amountAtomic }, committedAtomic).reasonCodes,
-      );
+      const codes = new Set<string>(policy({ mint: request.mint, recipient: request.recipient, amountAtomic: request.amountAtomic }, committedAtomic));
 
       for (const code of challengeCodes) {
         codes.add(code);
       }
 
       if (requirement !== null) {
-        for (const code of policy({ mint: requirement.asset, recipient: requirement.payTo, amountAtomic: requirement.amountAtomic }, committedAtomic).reasonCodes) {
+        for (const code of policy({ mint: requirement.asset, recipient: requirement.payTo, amountAtomic: requirement.amountAtomic }, committedAtomic)) {
           codes.add(code);
         }
       } else if (codes.size === 0) {
@@ -576,6 +661,9 @@ export class AuthorityService {
           grantId: permit.grantId,
           agent: permit.authorizedAgent,
           serviceId: request.service,
+          operation: request.operation.operation,
+          datasetId: request.operation.datasetId,
+          operationDigest,
           decision: "DENY",
           reasonCodes: result.invocation.reasonCodes,
         });
@@ -585,13 +673,13 @@ export class AuthorityService {
       case "reserved": {
         this.#auditDecision(permit, result.invocation);
 
-        if (challenge === null || requirement === null || resource === null) {
+        if (challenge === null || requirement === null || paidRequest === null) {
           // Unreachable: an allowed decision requires a valid requirement.
           await this.#store.fail(invocationId, "internal: reserved without a payment requirement");
           throw new Error("Reserved an invocation without a payment requirement.");
         }
 
-        const confirmed = await this.#pay(permit, result.invocation, resource, challenge, requirement);
+        const confirmed = await this.#pay(permit, result.invocation, paidRequest, challenge, requirement);
         return this.#result(confirmed, await this.#ensureReceipt(confirmed), false);
       }
     }
@@ -629,13 +717,25 @@ export class AuthorityService {
   }
 
   async #pay(
-    permit: SignedPurchasePermitV1,
+    permit: SignedPurchasePermitV2,
     invocation: InvocationRecord,
-    resource: PaidResource,
+    paidRequest: PaidRequest,
     challenge: PaymentChallenge,
     requirement: PaymentRequirement,
   ): Promise<InvocationRecord> {
     const { invocationId } = invocation;
+
+    // Outbound binding: re-derive the request from the durably recorded,
+    // authenticated operation and require the exact bytes about to be paid
+    // for to match. The agent cannot authorize operation A and have the
+    // authority transmit operation B. (The provider separately refuses to
+    // pay for anything but the request the challenge was issued for.)
+    if (!this.#outboundMatchesAuthorization(invocation, paidRequest)) {
+      await this.#store.fail(invocationId, "outbound request does not match the authorized operation");
+      this.#log({ event: "authority.outbound_request_mismatch", invocationId, grantId: permit.grantId });
+      throw new OutboundRequestMismatchError(invocationId);
+    }
+
     const budget = await this.getGrantBudget(permit.issuer, permit.grantId);
 
     this.#log({
@@ -644,6 +744,8 @@ export class AuthorityService {
       grantId: permit.grantId,
       agent: permit.authorizedAgent,
       serviceId: permit.service,
+      requestBody: paidRequest.body,
+      requestSha256: paidRequest.sha256,
       decision: "ALLOW",
       protocol: requirement.protocol,
       scheme: requirement.scheme,
@@ -657,7 +759,7 @@ export class AuthorityService {
 
     try {
       execution = await this.#paymentProvider.execute({
-        resource,
+        request: paidRequest,
         challenge,
         requirement,
         reference: invocationId,
@@ -725,6 +827,25 @@ export class AuthorityService {
         });
       throw new ReconciliationRequiredError(invocationId);
     }
+  }
+
+  #outboundMatchesAuthorization(invocation: InvocationRecord, paidRequest: PaidRequest): boolean {
+    const stored = invocation.request;
+
+    if (stored.version !== 2) {
+      return false;
+    }
+
+    const resource = this.#paidServices.get(paidServiceKey(stored.service, stored.capability));
+    const expected = resource === undefined ? null : buildPaidRequest(resource, stored.operation);
+
+    return (
+      expected !== null &&
+      expected.sha256 === paidRequest.sha256 &&
+      expected.url === paidRequest.url &&
+      expected.method === paidRequest.method &&
+      expected.body === paidRequest.body
+    );
   }
 
   /**
@@ -805,7 +926,7 @@ export class AuthorityService {
     return reports;
   }
 
-  #result(invocation: InvocationRecord, receipt: SignedAuthorizationReceiptV1, replay: boolean): AuthorizeResult {
+  #result(invocation: InvocationRecord, receipt: SignedAuthorizationReceipt, replay: boolean): AuthorizeResult {
     const requirement = invocation.paymentRequirement;
     const attempt = invocation.paymentAttempt;
     const payment: PaymentEvidence | null =
@@ -820,6 +941,7 @@ export class AuthorityService {
             payTo: requirement.payTo,
             amountAtomic: requirement.amountAtomic,
             resourceUrl: requirement.resourceUrl,
+            requestSha256: attempt?.requestSha256 ?? null,
             payer: attempt?.payer ?? null,
             payerSignature: attempt?.payerSignature ?? null,
             blockhash: attempt?.blockhash ?? null,
@@ -834,9 +956,11 @@ export class AuthorityService {
   /**
    * Returns the stored receipt, or builds and stores one from durable state.
    * Receipts are derived only from the stored invocation, so a receipt
-   * produced after a restart describes exactly what was recorded.
+   * produced after a restart describes exactly what was recorded. v2
+   * requests get v2 receipts (with the operation); invocations recorded
+   * before operation binding keep the v1 receipt format.
    */
-  async #ensureReceipt(invocation: InvocationRecord): Promise<SignedAuthorizationReceiptV1> {
+  async #ensureReceipt(invocation: InvocationRecord): Promise<SignedAuthorizationReceipt> {
     if (invocation.receipt !== null) {
       return invocation.receipt;
     }
@@ -846,34 +970,43 @@ export class AuthorityService {
     }
 
     const { request } = invocation;
-    const receipt = await signAuthorizationReceipt(
-      {
-        version: AUTHORIZATION_RECEIPT_VERSION,
-        domain: AUTHORIZATION_RECEIPT_DOMAIN,
-        invocationId: invocation.invocationId,
-        grantId: invocation.grantId,
-        authority: this.#authorityAddress,
-        agent: invocation.agent,
-        permitDigest: request.permitDigest,
-        requestFingerprint: invocation.fingerprint,
-        service: request.service,
-        capability: request.capability,
-        network: request.network,
-        mint: request.mint,
-        recipient: request.recipient,
-        amountAtomic: invocation.amountAtomic,
-        decision: invocation.state === "CONFIRMED" ? "ALLOW" : "DENY",
-        reasonCodes: invocation.reasonCodes,
-        paymentTransactionId: invocation.paymentTransactionId,
-        decidedAt: invocation.decidedAt,
-      },
-      this.#authoritySigner,
-    );
+    const fields: Omit<UnsignedAuthorizationReceiptV1, "version"> = {
+      domain: AUTHORIZATION_RECEIPT_DOMAIN,
+      invocationId: invocation.invocationId,
+      grantId: invocation.grantId,
+      authority: this.#authorityAddress,
+      agent: invocation.agent,
+      permitDigest: request.permitDigest,
+      requestFingerprint: invocation.fingerprint,
+      service: request.service,
+      capability: request.capability,
+      network: request.network,
+      mint: request.mint,
+      recipient: request.recipient,
+      amountAtomic: invocation.amountAtomic,
+      decision: invocation.state === "CONFIRMED" ? "ALLOW" : "DENY",
+      reasonCodes: invocation.reasonCodes,
+      paymentTransactionId: invocation.paymentTransactionId,
+      decidedAt: invocation.decidedAt,
+    };
+
+    const receipt =
+      request.version === 2
+        ? await signAuthorizationReceipt(
+            {
+              version: AUTHORIZATION_RECEIPT_VERSION_2,
+              ...fields,
+              operation: request.operation,
+              operationDigest: await computeOperationDigest(request.operation),
+            },
+            this.#authoritySigner,
+          )
+        : await signAuthorizationReceipt({ version: AUTHORIZATION_RECEIPT_VERSION, ...fields }, this.#authoritySigner);
 
     return this.#store.attachReceipt(invocation.invocationId, receipt);
   }
 
-  #auditDecision(permit: SignedPurchasePermitV1, invocation: InvocationRecord): void {
+  #auditDecision(permit: SignedPurchasePermitV2, invocation: InvocationRecord): void {
     this.#auditLog.append({
       type: "policy.decision",
       actor: permit.authorizedAgent,
