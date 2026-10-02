@@ -133,7 +133,7 @@ This is the same check the authority uses for reconciliation (`checkSettledTrans
 | `INVALID` | checked and wrong: the evidence is not acceptable |
 | `NOT_SATISFIED` | a policy condition does not hold, consistently with an authority DENY (e.g. `operation_matches_permit` in a denied-export bundle) |
 | `AUTHORITY_ATTESTED` | supported only by the pinned authority's signed statement |
-| `SERVICE_ATTESTED` | supported only by the paid service's statement (unused until Phase 5C) |
+| `SERVICE_ATTESTED` | supported by the paid service's own signed statement, verified against the pinned service key (see Phase 5C below) |
 | `NOT_CHECKED` | not applicable to this bundle or mode |
 | `NOT_PROVABLE_FROM_BUNDLE` | cannot be established from one bundle, by design |
 | `INDETERMINATE` | could not be decided (RPC unavailable, outcome not final) |
@@ -160,7 +160,13 @@ This is the same check the authority uses for reconciliation (`checkSettledTrans
 - the reasons for a DENY that are not static (budget, challenge problems)
 - that the payer wallet belongs to the authority
 
-**Service-attested:** nothing yet. The service does not sign its result; that is Phase 5C.
+**Service-attested (Phase 5C, with `--service-trust`):** the pinned service signed that it:
+- accepted this authority authorization
+- received exactly this request and operation
+- was paid by this transaction
+- returned exactly these result bytes
+
+The signature is cryptographically VERIFIED. What the service *asserts* about producing the result is SERVICE_ATTESTED, and whether the result is correct remains NOT_PROVABLE.
 
 **Not provable from one bundle** (printed with every report):
 - that the human understood the permit
@@ -207,4 +213,48 @@ This is the same check the authority uses for reconciliation (`checkSettledTrans
 - **One pinned key per role.** There is no key rotation or revocation. If the authority receipt key is lost (`docker compose down -v`), older bundles still verify against the old public key, but only if the verifier kept it.
 - **Payer identity is attested.** The payment wallet is ephemeral per authority process. The bundle proves that *this* payer signed *this* transfer, but that the payer is Virtual Haibin's wallet is authority-attested.
 - **Mainnet-looking identifiers.** Sandbox challenges carry mainnet's CAIP-2 id and the USDC mint address. The environment claim rests on the sandbox blockhash prefix and, online, on the RPC identifying as Surfnet.
-- **Result integrity, not result truth.** The result's integrity is bound by the authority's manifest. Its correctness and service authorship are not proven (Phase 5C adds a service signature).
+- **Result integrity, not result truth.** The authority's manifest binds the result bytes. With a pinned service key, the service's own signature binds them too (Phase 5C). Neither proves the content is correct.
+- **Service trust is pinned, not discovered.** The service's acknowledgement counts only against a service key the verifier pinned. Without `--service-trust`, the service claims are NOT_CHECKED.
+
+## Phase 5C: service-side verification and the service acknowledgement
+
+Before Phase 5C the paid service accepted any valid x402 payment. A Virtual Haibin-integrated service now also checks that **this paid request was authorized by the Virtual Haibin authority it pins**, and it signs what it did.
+
+```text
+authority ── paid retry + x-vh-authorization: ServiceAuthorizationV1 ──▶ service
+                (authority-signed: invocation, exact request digest,
+                 operation digest, payment terms, 120 s validity)
+                                                     │ BEFORE its x402 gate settles:
+                                                     │  - signed by the pinned authority key?
+                                                     │  - unexpired?
+                                                     │  - exactly the received method/path/body bytes?
+                                                     │  - same invocation id?
+                                                     │  - exactly this service's price/payTo/asset?
+                                                     │  any failure -> 403, nothing settled
+authority ◀── 200 + x-vh-service-acknowledgement: ServiceAcknowledgementV1 ──
+                (service-signed: accepted authorization digest, received request digest,
+                 performed operation, payment transaction, result SHA-256 and size)
+```
+
+- **Authorization, authority side.** `ServiceAuthorizationV1` is signed by the authority's persistent key. It is sent only on the paid retry, never on the public 402 probe, and it is stored with the payment attempt *before* the credential is transmitted.
+- **Rejection, service side.** If the service rejects the authorization, the authority sees a failure after transmission. The invocation becomes `RECONCILIATION_REQUIRED` and is never retried. Reconciliation then finds nothing settled and releases it. Payment and reconciliation semantics are unchanged.
+- **Acknowledgement.** `ServiceAcknowledgementV1` is signed with the service's own persistent key, held in the service-only `service_keys` volume; its public key is published to `service_trust`. The authority pins that key and keeps an acknowledgement only if every field matches what it sent and received. A missing or invalid acknowledgement is logged and dropped. It never changes the payment outcome, because the payment has already settled.
+- **Evidence.** EvidenceBundleV2 / manifest v2 add `serviceAuthorization` and `serviceAcknowledgement`, both covered by the manifest digests. EvidenceBundleV1 bundles still verify.
+
+### Verifier claims (SERVICE)
+
+| Claim | Requires | Meaning |
+|---|---|---|
+| `service_authorization` | pinned authority | the authority's authorization covers exactly the bundled outbound request, operation and x402 terms |
+| `service_trusted` | `--service-trust` | the acknowledgement names the pinned service key |
+| `service_acknowledgement` | `--service-trust` | signature by the pinned service key, and every field (authorization digest, request digest, operation, payment terms, settlement transaction, result SHA-256 and size) matches the bundle. This is checked even when the authority vouched for the acknowledgement |
+| `service_result_attestation` | `--service-trust` | **SERVICE_ATTESTED**: the service asserts it produced exactly this result for this paid request |
+| `result_correctness` | — | always **NOT_PROVABLE_FROM_BUNDLE** |
+
+With `--service-trust`, a CONFIRMED v2 bundle without a valid acknowledgement is INVALID. Without it, the service claims are NOT_CHECKED and the overall result is unaffected.
+
+### Not proven, even with the service signature
+
+- that the service's answer is correct
+- that the service did not also serve the same result elsewhere
+- that a service which does not verify `x-vh-authorization` would refuse unauthorized payers: this is a property of *integrated* services, not of x402

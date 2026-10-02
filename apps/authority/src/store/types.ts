@@ -1,5 +1,6 @@
 import type { AgentRequestSignature, AuthorizationRequestV1, AuthorizationRequestV2, SignedPurchasePermitV2 } from "@virtual-haibin/mandate";
 import type { ConfirmedSettlement, PaidResult, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
+import type { SignedServiceAuthorizationV1 } from "@virtual-haibin/evidence";
 import type { SignedAuthorizationReceipt } from "../receipt.js";
 
 /**
@@ -29,11 +30,12 @@ export interface AuthorityStore {
   reserve(input: ReserveInput, evaluate: BudgetEvaluator): Promise<ReserveResult>;
 
   /**
-   * Records the payment attempt (payer signature, blockhash, expiry) on a
-   * RESERVED invocation. Must succeed *before* the credential is transmitted,
-   * so a crash afterwards can still be reconciled.
+   * Records the payment attempt (payer signature, blockhash, expiry) -- and
+   * the service authorization that will accompany it -- on a RESERVED
+   * invocation. Must succeed *before* the credential is transmitted, so a
+   * crash afterwards can still be reconciled.
    */
-  recordPaymentAttempt(invocationId: string, attempt: PaymentAttempt): Promise<void>;
+  recordPaymentAttempt(invocationId: string, attempt: PaymentAttempt, serviceAuthorization?: SignedServiceAuthorizationV1): Promise<void>;
 
   /** RESERVED -> CONFIRMED; moves the amount from reserved to consumed and stores settlement evidence. */
   confirm(invocationId: string, payment: ConfirmPayment): Promise<InvocationRecord>;
@@ -160,6 +162,8 @@ export type InvocationRecord = {
   receipt: SignedAuthorizationReceipt | null;
   /** NULL for invocations recorded before evidence capture (schema < v3). */
   authorization: StoredAuthorizationEvidence | null;
+  /** Authority-signed service authorization sent with the paid retry (schema >= v4). */
+  serviceAuthorization: SignedServiceAuthorizationV1 | null;
   stateReason: string | null;
   decidedAt: number;
   createdAt: number;

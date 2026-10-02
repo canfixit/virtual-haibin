@@ -399,7 +399,7 @@ test("an invocation resolved by another process mid-run is reported as already_r
   await service.reconcile();
   const staleStore: AuthorityStore = {
     reserve: (input, evaluate) => store.reserve(input, evaluate),
-    recordPaymentAttempt: (id, attempt) => store.recordPaymentAttempt(id, attempt),
+    recordPaymentAttempt: (id, attempt, authorization) => store.recordPaymentAttempt(id, attempt, authorization),
     confirm: (id, payment) => store.confirm(id, payment),
     resolveReconciliation: (id, outcome) => store.resolveReconciliation(id, outcome),
     listReconciliationRequired: async () => staleList,

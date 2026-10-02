@@ -259,6 +259,12 @@ importers:
       '@solana/pay-kit':
         specifier: 0.12.0
         version: 0.12.0(@solana/addresses@8.4.0(typescript@6.0.3))(@solana/codecs-core@8.4.0(typescript@6.0.3))(@solana/codecs-strings@8.4.0(typescript@6.0.3))(@solana/keys@8.4.0(typescript@6.0.3))(@solana/signers@6.10.0(typescript@6.0.3))(@solana/sysvars@5.5.1(typescript@6.0.3))(@solana/transactions@6.10.0(typescript@6.0.3))(@x402/core@2.27.0)(express@5.2.1)(typescript@6.0.3)(viem@2.57.0(typescript@6.0.3)(zod@4.6.5))
+      '@virtual-haibin/evidence':
+        specifier: workspace:*
+        version: link:../../packages/evidence
+      '@virtual-haibin/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       express:
         specifier: ^5.2.1
         version: 5.2.1

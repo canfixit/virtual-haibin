@@ -147,7 +147,8 @@ type MerchantMode = "settle" | "http500" | "reset" | "lie" | "redirect" | "free"
 const merchant = {
   mode: "settle" as MerchantMode,
   amount: "10000",
-  requests: [] as Array<{ paid: boolean; credentialTx: string | null; invocationHeader: string | null; method: string; body: string }>,
+  requests: [] as Array<{ paid: boolean; credentialTx: string | null; invocationHeader: string | null; method: string; body: string; authorizationHeader: string | null }>,
+  acknowledgement: null as string | null,
 };
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -176,6 +177,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, baseUr
     invocationHeader: (request.headers["x-vh-invocation-id"] as string) ?? null,
     method: request.method ?? "",
     body: await readBody(request),
+    authorizationHeader: (request.headers["x-vh-authorization"] as string) ?? null,
   };
   merchant.requests.push(record);
 
@@ -243,6 +245,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, baseUr
 
   // "lie": claims success but nothing reached the chain.
   response.writeHead(200, {
+    ...(merchant.acknowledgement === null ? {} : { "x-vh-service-acknowledgement": merchant.acknowledgement }),
     "content-type": "application/json",
     "payment-response": encodePaymentResponseHeader({ success: true, transaction: id, network: NETWORK, payer } as never),
   });
@@ -281,6 +284,7 @@ beforeEach(() => {
   merchant.mode = "settle";
   merchant.amount = "10000";
   merchant.requests.length = 0;
+  merchant.acknowledgement = null;
   chain.blockhash = SANDBOX_BLOCKHASH;
   chain.surfnet = true;
   chain.height = 900;
@@ -606,4 +610,35 @@ test("paying for a different request than the one challenged is refused before s
 
   assert.equal(signer.signCount, 0);
   assert.equal(merchant.requests.filter((r) => r.paid).length, 0);
+});
+
+test("the service authorization header is sent only on the paid retry, and the acknowledgement header is captured (bounded)", async () => {
+  const p = await provider();
+  const parsed = await challenge(p);
+  merchant.acknowledgement = "ack-header-value";
+
+  const execution = await p.execute({
+    request: resource,
+    challenge: parsed,
+    requirement: parsed.requirements[0]!,
+    reference: "inv-1",
+    serviceAuthorizationHeader: "authz-header-value",
+    beforeSubmit: async () => {},
+  });
+
+  assert.deepEqual(
+    merchant.requests.map((r) => ({ paid: r.paid, authorizationHeader: r.authorizationHeader })),
+    [
+      { paid: false, authorizationHeader: null },
+      { paid: true, authorizationHeader: "authz-header-value" },
+    ],
+  );
+  assert.equal(execution.result.serviceAcknowledgementHeader, "ack-header-value");
+
+  // Oversized acknowledgement headers are dropped, never stored.
+  merchant.requests.length = 0;
+  merchant.acknowledgement = "x".repeat(5000);
+  const parsedAgain = await challenge(p);
+  const big = await p.execute({ request: resource, challenge: parsedAgain, requirement: parsedAgain.requirements[0]!, reference: "inv-1", beforeSubmit: async () => {} });
+  assert.equal(big.result.serviceAcknowledgementHeader, undefined);
 });

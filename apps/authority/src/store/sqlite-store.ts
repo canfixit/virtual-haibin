@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import type { ConfirmedSettlement, PaidResult, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
+import type { SignedServiceAuthorizationV1 } from "@virtual-haibin/evidence";
 import type { SignedAuthorizationReceipt } from "../receipt.js";
 import {
   InvalidStateTransitionError,
@@ -31,7 +32,7 @@ import {
  * Amounts are stored as canonical decimal TEXT and computed with BigInt:
  * SQLite INTEGER is signed 64-bit and cannot hold the full u64 token range.
  */
-export const SQLITE_SCHEMA_VERSION = 3;
+export const SQLITE_SCHEMA_VERSION = 4;
 
 export type SqliteAuthorityStoreOptions = {
   now?: () => number;
@@ -115,10 +116,19 @@ const SCHEMA_V3 = `
 ALTER TABLE invocations ADD COLUMN authorization_json TEXT;
 `;
 
+/**
+ * v4 (Phase 5C): the authority-signed service authorization sent with the
+ * paid retry, recorded together with the payment attempt (before transmission).
+ */
+const SCHEMA_V4 = `
+ALTER TABLE invocations ADD COLUMN service_authorization_json TEXT;
+`;
+
 const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
   { version: 1, sql: SCHEMA_V1 },
   { version: 2, sql: SCHEMA_V2 },
   { version: 3, sql: SCHEMA_V3 },
+  { version: 4, sql: SCHEMA_V4 },
 ];
 
 const MAX_U64 = 18446744073709551615n;
@@ -140,6 +150,7 @@ type InvocationRow = {
   settlement_json: string | null;
   result_json: string | null;
   authorization_json: string | null;
+  service_authorization_json: string | null;
   state_reason: string | null;
   decided_at: number;
   created_at: number;
@@ -179,6 +190,7 @@ function toInvocation(row: InvocationRow): InvocationRecord {
     result: parseOrNull<PaidResult>(row.result_json),
     receipt: parseOrNull<SignedAuthorizationReceipt>(row.receipt_json),
     authorization: parseOrNull<StoredAuthorizationEvidence>(row.authorization_json),
+    serviceAuthorization: parseOrNull<SignedServiceAuthorizationV1>(row.service_authorization_json),
     stateReason: row.state_reason,
     decidedAt: row.decided_at,
     createdAt: row.created_at,
@@ -246,7 +258,8 @@ export class SqliteAuthorityStore implements AuthorityStore {
       // payment evidence is cleared (it never settled).
       updateInvocationDecision: prepare(
         `UPDATE invocations SET state = ?, reason_codes_json = ?, request_json = ?, amount_atomic = ?,
-           payment_requirement_json = ?, authorization_json = ?, payment_attempt_json = NULL, settlement_json = NULL, result_json = NULL,
+           payment_requirement_json = ?, authorization_json = ?, payment_attempt_json = NULL, service_authorization_json = NULL,
+           settlement_json = NULL, result_json = NULL,
            payment_transaction_id = NULL, decided_at = ?, state_reason = NULL, updated_at = ?
          WHERE invocation_id = ? AND state = 'FAILED'`,
       ),
@@ -258,7 +271,7 @@ export class SqliteAuthorityStore implements AuthorityStore {
            updated_at = ? WHERE invocation_id = ? AND state = 'RESERVED'`,
       ),
       recordAttempt: prepare(
-        `UPDATE invocations SET payment_attempt_json = ?, updated_at = ?
+        `UPDATE invocations SET payment_attempt_json = ?, service_authorization_json = ?, updated_at = ?
          WHERE invocation_id = ? AND state = 'RESERVED' AND payment_attempt_json IS NULL`,
       ),
       resolveConfirmed: prepare(
@@ -343,7 +356,7 @@ export class SqliteAuthorityStore implements AuthorityStore {
     });
   }
 
-  async recordPaymentAttempt(invocationId: string, attempt: PaymentAttempt): Promise<void> {
+  async recordPaymentAttempt(invocationId: string, attempt: PaymentAttempt, serviceAuthorization?: SignedServiceAuthorizationV1): Promise<void> {
     this.#transaction(() => {
       const invocation = this.#requireState(invocationId, "RESERVED", "record a payment attempt");
 
@@ -352,7 +365,8 @@ export class SqliteAuthorityStore implements AuthorityStore {
       }
 
       const now = this.#now();
-      this.#expectOneChange(this.#statements.recordAttempt.run(JSON.stringify(attempt), now, invocationId), invocationId, "record attempt");
+      const authorizationJson = serviceAuthorization === undefined ? null : JSON.stringify(serviceAuthorization);
+      this.#expectOneChange(this.#statements.recordAttempt.run(JSON.stringify(attempt), authorizationJson, now, invocationId), invocationId, "record attempt");
       this.#recordTransition(invocationId, "RESERVED", "RESERVED", `payment attempt ${attempt.payerSignature}`, now);
     });
   }

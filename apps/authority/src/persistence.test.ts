@@ -164,13 +164,17 @@ test("a crash mid-payment becomes RECONCILIATION_REQUIRED on restart and is neve
   const hanging = new CountingPaymentProvider({ behavior: "hang" });
   const first = await startProcess(path, hanging);
   void first.service.authorize(input).catch(() => {});
-  await waitFor(async () => (await first.store.getInvocation("inv-crash-1"))?.state === "RESERVED");
+  // "Mid-payment": the attempt (and its service authorization) is durably
+  // recorded, so the credential may have left. A crash before this point is
+  // provably unsent and is released instead (tested separately).
+  await waitFor(async () => (await first.store.getInvocation("inv-crash-1"))?.paymentAttempt != null);
   await first.store.close();
 
   const provider = new CountingPaymentProvider();
   const second = await startProcess(path, provider);
 
   assert.equal((await second.store.getInvocation("inv-crash-1"))?.state, "RECONCILIATION_REQUIRED");
+  assert.equal((await second.store.getInvocation("inv-crash-1"))?.serviceAuthorization?.invocationId, "inv-crash-1");
   await assert.rejects(
     second.service.authorize(await signedInput(permit, { invocationId: "inv-crash-1", amountAtomic: "20000" })),
     ReconciliationRequiredError,
@@ -240,7 +244,7 @@ test("if a completed payment cannot be recorded, the invocation is blocked inste
       }
       return sqliteStore.confirm(invocationId, payment);
     },
-    recordPaymentAttempt: (invocationId, attempt) => sqliteStore.recordPaymentAttempt(invocationId, attempt),
+    recordPaymentAttempt: (invocationId, attempt, authorization) => sqliteStore.recordPaymentAttempt(invocationId, attempt, authorization),
     resolveReconciliation: (invocationId, outcome) => sqliteStore.resolveReconciliation(invocationId, outcome),
     listReconciliationRequired: () => sqliteStore.listReconciliationRequired(),
     fail: (invocationId, reason) => sqliteStore.fail(invocationId, reason),

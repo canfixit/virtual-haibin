@@ -48,5 +48,6 @@ jobs:
             pnpm --filter @virtual-haibin/agent test
             pnpm --filter @virtual-haibin/evidence test
             pnpm --filter @virtual-haibin/verifier test
+            pnpm --filter @virtual-haibin/service-agent test
             pnpm check
           '

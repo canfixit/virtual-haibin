@@ -144,7 +144,9 @@ Evidence verification uses two tools-profile services. Bundles are exported to t
 ./scripts/evidence-demo.sh
 ```
 
-The authority's receipt-signing seed lives in `authority_data` (authority only). Its public key is published to `authority_trust`, which the verifiers mount read-only.
+The authority's receipt-signing seed lives in `authority_data` (authority only). Its public key is published to `authority_trust`, which the verifiers and the paid service mount read-only.
+
+The paid service's acknowledgement seed lives in `service_keys` (service only). Its public key is published to `service_trust`, which the authority and the verifiers mount read-only. The authority starts after the service, because it pins the service's key. The service reads the authority's key lazily, on its first paid request.
 
 `down -v` likewise deletes `approver_keys` and `issuer_trust`. On the next start the approver creates a **new** issuer key and approval code, and the authority trusts only the new issuer.
 

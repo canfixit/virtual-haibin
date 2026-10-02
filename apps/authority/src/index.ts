@@ -6,7 +6,7 @@ import { AuthorityService } from "./authorize.js";
 import { createPaidServiceRegistry } from "./payment-challenge.js";
 import { createAuthorityServer } from "./server.js";
 import { SqliteAuthorityStore } from "./store/sqlite-store.js";
-import { loadIssuerEntitlement } from "./trust.js";
+import { loadIssuerEntitlement, loadPinnedPublicKey } from "./trust.js";
 
 const port = Number(process.env.AUTHORITY_PORT ?? 4002);
 const sharedSecret = process.env.AUTHORITY_SHARED_SECRET;
@@ -40,6 +40,15 @@ const authorityTrustFile = process.env.AUTHORITY_TRUST_PUBLISH_FILE;
 
 if (!receiptKeyFile || !authorityTrustFile) {
   throw new Error("AUTHORITY_RECEIPT_KEY_FILE and AUTHORITY_TRUST_PUBLISH_FILE are required (see compose.yaml).");
+}
+
+// The paid service's pinned acknowledgement key (published by the service,
+// mounted read-only). Its signed acknowledgements are kept only if they
+// verify against this key.
+const serviceTrustFile = process.env.AUTHORITY_SERVICE_TRUST_FILE;
+
+if (!serviceTrustFile) {
+  throw new Error("AUTHORITY_SERVICE_TRUST_FILE is required (see compose.yaml).");
 }
 
 if (!databasePath) {
@@ -96,6 +105,7 @@ const paidServices = createPaidServiceRegistry([
 // Only this issuer may authorize spending from the payment wallet above, and
 // only on the sandbox profile.
 const issuerEntitlement = loadIssuerEntitlement(trustedIssuerFile, [sandboxProfile.permitNetwork]);
+const trustedServiceKeys = new Map([["mock-dataset-reports", loadPinnedPublicKey(serviceTrustFile, "Paid service")]]);
 
 mkdirSync(dirname(databasePath), { recursive: true });
 const store = new SqliteAuthorityStore(databasePath);
@@ -105,6 +115,7 @@ const authorityService = new AuthorityService({
   authorityAddress,
   audience,
   issuerEntitlement,
+  trustedServiceKeys,
   paymentProvider,
   paidServices,
   settlementProfiles: new Map([[sandboxProfile.permitNetwork, sandboxProfile]]),
@@ -159,6 +170,7 @@ server.listen(port, () => {
       port,
       authorityAddress,
       trustedIssuer: issuerEntitlement.issuer,
+      trustedServiceKey: trustedServiceKeys.get("mock-dataset-reports"),
       receiptKeyCreated: receiptKey.created,
       authorityTrustFile,
       databasePath,

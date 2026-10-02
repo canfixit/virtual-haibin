@@ -27,7 +27,18 @@ import {
   type SignedAuthorizationReceipt,
   type UnsignedAuthorizationReceiptV1,
 } from "./receipt.js";
-import type { EvidenceBundleV1 } from "@virtual-haibin/evidence";
+import {
+  decodeServiceAcknowledgementHeader,
+  encodeServiceHeader,
+  SERVICE_AUTHORIZATION_DOMAIN,
+  SERVICE_AUTHORIZATION_TTL_MS,
+  serviceAuthorizationDigest,
+  signServiceAuthorization,
+  verifyServiceAcknowledgementSignature,
+  type EvidenceBundle,
+  type SignedServiceAuthorizationV1,
+} from "@virtual-haibin/evidence";
+import type { ConfirmedSettlement, PaidResult } from "@virtual-haibin/payments";
 import { buildEvidenceBundle, EvidenceExportError } from "./evidence-export.js";
 import { buildPaidRequest, paidServiceKey, selectAndValidateChallenge, type PaidServiceRegistry } from "./payment-challenge.js";
 import {
@@ -111,6 +122,11 @@ export type AuthorityServiceOptions = {
   audience: string;
   /** Trust root: the only issuer whose permits may spend from this authority. */
   issuerEntitlement: IssuerEntitlement;
+  /**
+   * Pinned public keys of paid services, by serviceId. A service's signed
+   * acknowledgement is kept only if it verifies against its pinned key.
+   */
+  trustedServiceKeys?: ReadonlyMap<string, string>;
   paymentProvider: PaymentProvider;
   /** Trusted paid-resource registry; the only URLs the authority will call. */
   paidServices: PaidServiceRegistry;
@@ -343,6 +359,7 @@ export class AuthorityService {
   readonly #authorityAddress: string;
   readonly #audience: string;
   readonly #issuerEntitlement: IssuerEntitlement;
+  readonly #trustedServiceKeys: ReadonlyMap<string, string>;
   readonly #paymentProvider: PaymentProvider;
   readonly #paidServices: PaidServiceRegistry;
   readonly #settlementProfiles: ReadonlyMap<string, SettlementProfile>;
@@ -361,6 +378,7 @@ export class AuthorityService {
     this.#authorityAddress = options.authorityAddress;
     this.#audience = options.audience;
     this.#issuerEntitlement = options.issuerEntitlement;
+    this.#trustedServiceKeys = options.trustedServiceKeys ?? new Map();
     this.#paymentProvider = options.paymentProvider;
     this.#paidServices = options.paidServices;
     this.#settlementProfiles = options.settlementProfiles;
@@ -398,7 +416,7 @@ export class AuthorityService {
    * manifest signed by this authority's (persistent) receipt key. Reads only
    * the one invocation; there is no general query surface.
    */
-  async exportEvidence(invocationId: string): Promise<EvidenceBundleV1> {
+  async exportEvidence(invocationId: string, options: { bundleVersion?: 1 | 2 } = {}): Promise<EvidenceBundle> {
     const invocation = await this.#store.getInvocation(invocationId);
 
     if (invocation === null) {
@@ -412,6 +430,7 @@ export class AuthorityService {
         authorityAddress: this.#authorityAddress,
         signer: this.#authoritySigner,
         issuedAt: this.#now(),
+        bundleVersion: options.bundleVersion ?? 2,
       });
       this.#log({ event: "authority.evidence_exported", invocationId, grantId: invocation.grantId, purchaseState: invocation.state });
       return bundle;
@@ -798,6 +817,22 @@ export class AuthorityService {
       remainingAtomic: budget?.remainingAtomic,
     });
 
+    // Tells a Virtual Haibin-integrated service that THIS paid request was
+    // authorized by THIS authority, so it can refuse anything else before its
+    // gate settles. Sent only with the paid retry; persisted with the attempt
+    // before the credential leaves. Built before anything is transmitted, so a
+    // failure here provably paid nothing.
+    let serviceAuthorization: SignedServiceAuthorizationV1;
+
+    try {
+      serviceAuthorization = await this.#signServiceAuthorization(invocation, permit, paidRequest, requirement);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown";
+      await this.#store.fail(invocationId, `service authorization not built: ${message}`);
+      this.#log({ event: "authority.payment_not_submitted", invocationId, grantId: permit.grantId, error: message });
+      throw new PaymentNotSubmittedFailure(invocationId);
+    }
+
     let execution;
 
     try {
@@ -806,9 +841,10 @@ export class AuthorityService {
         challenge,
         requirement,
         reference: invocationId,
+        serviceAuthorizationHeader: encodeServiceHeader(serviceAuthorization),
         // Persisted before the credential leaves, so a crash afterwards can
         // still be reconciled from the payer signature + blockhash.
-        beforeSubmit: (attempt) => this.#store.recordPaymentAttempt(invocationId, attempt),
+        beforeSubmit: (attempt) => this.#store.recordPaymentAttempt(invocationId, attempt, serviceAuthorization),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown";
@@ -832,11 +868,12 @@ export class AuthorityService {
     }
 
     try {
+      const result = await this.#acceptAcknowledgement(invocation, permit, serviceAuthorization, paidRequest, requirement, execution.settlement, execution.result);
       const confirmed = await this.#store.confirm(invocationId, {
         transactionId: execution.settlement.transactionId,
         settledAt: execution.settlement.confirmedAt,
         settlement: execution.settlement,
-        result: execution.result,
+        result,
       });
 
       this.#auditLog.append({
@@ -869,6 +906,97 @@ export class AuthorityService {
           // The row stays RESERVED, which startup recovery also treats as unknown.
         });
       throw new ReconciliationRequiredError(invocationId);
+    }
+  }
+
+  async #signServiceAuthorization(
+    invocation: InvocationRecord,
+    permit: SignedPurchasePermitV2,
+    paidRequest: PaidRequest,
+    requirement: PaymentRequirement,
+  ): Promise<SignedServiceAuthorizationV1> {
+    if (invocation.request.version !== 2) {
+      throw new Error("cannot authorize a service request for a pre-v2 invocation");
+    }
+
+    const issuedAt = this.#now();
+    return signServiceAuthorization(
+      {
+        version: 1,
+        domain: SERVICE_AUTHORIZATION_DOMAIN,
+        authority: this.#authorityAddress,
+        invocationId: invocation.invocationId,
+        grantId: permit.grantId,
+        request: { method: paidRequest.method, url: paidRequest.url, contentType: paidRequest.contentType, requestSha256: paidRequest.sha256 },
+        operationDigest: await computeOperationDigest(invocation.request.operation),
+        payment: { network: requirement.network, asset: requirement.asset, payTo: requirement.payTo, amountAtomic: requirement.amountAtomic },
+        issuedAt,
+        expiresAt: issuedAt + SERVICE_AUTHORIZATION_TTL_MS,
+      },
+      this.#authoritySigner,
+    );
+  }
+
+  /**
+   * Keeps the service's acknowledgement header only if it verifies against
+   * the service's PINNED key and states exactly this invocation, the
+   * authorization we sent, the request we sent, the operation, the payment
+   * terms, the confirmed transaction and the result bytes we received.
+   * Otherwise it is dropped (and logged). The payment itself is already
+   * settled and confirmed; an acknowledgement never changes payment state.
+   */
+  async #acceptAcknowledgement(
+    invocation: InvocationRecord,
+    permit: SignedPurchasePermitV2,
+    authorization: SignedServiceAuthorizationV1,
+    paidRequest: PaidRequest,
+    requirement: PaymentRequirement,
+    settlement: ConfirmedSettlement,
+    result: PaidResult,
+  ): Promise<PaidResult> {
+    const { serviceAcknowledgementHeader: header, ...withoutAcknowledgement } = result;
+    const reject = (reason: string) => {
+      this.#log({ event: "authority.service_acknowledgement_rejected", invocationId: invocation.invocationId, reason });
+      return withoutAcknowledgement;
+    };
+
+    if (header === undefined) {
+      return reject("service sent no acknowledgement");
+    }
+
+    const pinned = this.#trustedServiceKeys.get(permit.service);
+
+    if (pinned === undefined) {
+      return reject(`no pinned key for service ${permit.service}`);
+    }
+
+    try {
+      const ack = decodeServiceAcknowledgementHeader(header);
+      const op = invocation.request.version === 2 ? invocation.request.operation : null;
+      const problems = [
+        !(await verifyServiceAcknowledgementSignature(ack, pinned)) && "signature",
+        ack.invocationId !== invocation.invocationId && "invocation",
+        ack.authorizationDigest !== (await serviceAuthorizationDigest(authorization)) && "authorization",
+        ack.requestSha256 !== paidRequest.sha256 && "request",
+        (op === null ||
+          ack.received.method !== op.method ||
+          ack.received.resource !== op.resource ||
+          ack.received.operation !== op.operation ||
+          ack.received.datasetId !== op.datasetId) &&
+          "operation",
+        (ack.payment.asset !== requirement.asset || ack.payment.payTo !== requirement.payTo || ack.payment.amountAtomic !== requirement.amountAtomic) && "payment",
+        ack.payment.transaction !== settlement.transactionId && "transaction",
+        (ack.result.sha256 !== result.sha256 || ack.result.bytes !== result.bytes || ack.result.httpStatus !== result.httpStatus) && "result",
+      ].filter((problem): problem is string => typeof problem === "string");
+
+      if (problems.length > 0) {
+        return reject(`acknowledgement mismatch: ${problems.join(", ")}`);
+      }
+
+      this.#log({ event: "authority.service_acknowledged", invocationId: invocation.invocationId, service: ack.service, transactionId: settlement.transactionId });
+      return { ...withoutAcknowledgement, serviceAcknowledgementHeader: header };
+    } catch (error) {
+      return reject(error instanceof Error ? error.message : "malformed acknowledgement");
     }
   }
 

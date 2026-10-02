@@ -11,6 +11,7 @@
 #   5. tamper operation / amount / recipient / settlement / authority key -> INVALID
 #   6. verifier --online against the sandbox RPC             -> settlement VERIFIED
 #   7. restart the authority: same persistent key; old bundle still VALID
+#   8. (5C) the real service refuses a paid request without VH authorization
 #
 # Exit 0 pass / 1 INTEGRATION REGRESSION / 3 EXTERNAL ENVIRONMENT FAILURE
 # (sandbox purchase uncertain, or the sandbox RPC unobservable online).
@@ -20,6 +21,7 @@ cd "$(dirname "$0")/.."
 
 ISSUER=/trust/issuer/trusted-issuer
 AUTHORITY=/trust/authority/authority.pub
+SERVICE=/trust/service/service.pub
 fail=0
 external=0
 expect() { # expect <wanted-exit> <label> <cmd...>
@@ -28,7 +30,7 @@ expect() { # expect <wanted-exit> <label> <cmd...>
   local overall; overall=$(grep -o '^overall: [A-Z]*' .evidence/last.out | head -1 || true)
   if [[ $got == "$want" ]]; then echo "  ok   $label ($overall)"; else echo "  FAIL $label: exit $got, wanted $want"; cat .evidence/last.out; fail=1; fi
 }
-verify() { docker compose run --rm -T --no-deps verifier verify "$@" --issuer-trust $ISSUER --authority-trust $AUTHORITY; }
+verify() { docker compose run --rm -T --no-deps verifier verify "$@" --issuer-trust $ISSUER --authority-trust $AUTHORITY --service-trust $SERVICE; }
 # Whatever happens, never leave the authority stopped.
 trap 'docker compose start authority >/dev/null 2>&1 || true' EXIT
 
@@ -63,7 +65,7 @@ cp .evidence/last.out .evidence/offline-report.txt
 expect 0 "DENY bundle VALID offline (consistent denial)" verify "$deny" --offline
 
 echo "== 5. tampering"
-for kind in operation amount recipient settlement authority-key; do
+for kind in operation amount recipient settlement authority-key service-ack; do
   docker compose run --rm -T --no-deps --user "$(id -u):$(id -g)" demo-driver node scripts/tamper-evidence.mjs "$allow" ".evidence/tampered-$kind.json" "$kind" >/dev/null 2>&1
   expect 1 "tampered $kind -> INVALID" verify ".evidence/tampered-$kind.json" --offline
 done
@@ -73,10 +75,10 @@ if [[ "${EVIDENCE_DEMO_ONLINE:-1}" == "0" ]]; then
   echo "  skipped (EVIDENCE_DEMO_ONLINE=0)"
 else
   set +e
-  docker compose run --rm -T --no-deps verifier-online verify "$allow" --online --issuer-trust $ISSUER --authority-trust $AUTHORITY > .evidence/online-report.txt 2>&1
+  docker compose run --rm -T --no-deps verifier-online verify "$allow" --online --issuer-trust $ISSUER --authority-trust $AUTHORITY --service-trust $SERVICE > .evidence/online-report.txt 2>&1
   online_code=$?
   set -e
-  grep -E "^\s+(VERIFIED|INVALID|INDETERMINATE)\s+\*?\s*settlement" .evidence/online-report.txt || true
+  grep -E "^\s+(VERIFIED|INVALID|INDETERMINATE|SERVICE_ATTESTED|NOT_PROVABLE_FROM_BUNDLE)\s+\*?\s*(settlement|service_|result_correctness)" .evidence/online-report.txt || true
   case $online_code in
     0) echo "  ok   online VALID (settlement independently observed)" ;;
     2) echo "  EXT  online INDETERMINATE: sandbox RPC could not be observed (external)"; external=1 ;;
@@ -90,6 +92,10 @@ docker compose up -d --wait authority >/dev/null 2>&1
 key_after=$(docker compose exec -T authority cat /authority-trust/authority.pub)
 if [[ "$key_before" == "$key_after" ]]; then echo "  ok   authority key unchanged across restart ($key_after)"; else echo "  FAIL key changed: $key_before -> $key_after"; fail=1; fi
 expect 0 "pre-restart bundle still VALID" verify "$allow" --offline
+
+echo "== 8. the paid service refuses a paid request without Virtual Haibin authorization"
+expect 0 "service refuses before settlement (403 SERVICE_AUTHORIZATION_REQUIRED)" docker compose run --rm -T --no-deps demo-driver node scripts/service-refusal-check.mjs
+cat .evidence/last.out | tail -1 | sed 's/^/       /'
 
 if [[ $fail != 0 ]]; then echo "Evidence demo: INTEGRATION REGRESSION"; exit 1; fi
 if [[ $external != 0 ]]; then echo "Evidence demo: EXTERNAL ENVIRONMENT FAILURE (no product assertion failed)"; exit 3; fi

@@ -1,7 +1,7 @@
 // Demo helper: writes a copy of an evidence bundle with ONE security-relevant
 // edit (no re-signing -- an attacker has no authority key).
 //
-//   node scripts/tamper-evidence.mjs <in.json> <out.json> <operation|amount|recipient|settlement|authority-key>
+//   node scripts/tamper-evidence.mjs <in.json> <out.json> <operation|amount|recipient|settlement|authority-key|service-ack>
 
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -15,6 +15,8 @@ const edits = {
   recipient: (b) => (b.paymentRequirement.payTo = OTHER_ADDRESS),
   settlement: (b) => (b.settlement.transactionId = b.purchasePermit.signature.signature),
   "authority-key": (b) => (b.manifest.authority = OTHER_ADDRESS),
+  // Phase 5C: claim the service returned different bytes than it signed for.
+  "service-ack": (b) => (b.serviceAcknowledgement.result.sha256 = "0".repeat(64)),
 };
 
 if (!edits[kind]) {

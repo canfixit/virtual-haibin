@@ -6,6 +6,14 @@ import { createRpcSettlementSource } from "./online.js";
 import { signEvidenceManifest, verifyEvidenceManifestSignature } from "./manifest.js";
 import { EvidenceFormatError, MAX_BUNDLE_BYTES, parseEvidenceBundle } from "./parse.js";
 import { NOT_PROVEN } from "./verify.js";
+import {
+  decodeServiceAcknowledgementHeader,
+  decodeServiceAuthorizationHeader,
+  encodeServiceHeader,
+  SERVICE_AUTHORIZATION_DOMAIN,
+  signServiceAuthorization,
+  verifyServiceAuthorizationSignature,
+} from "./service.js";
 import { EVIDENCE_MANIFEST_DOMAIN, type UnsignedEvidenceManifestV1 } from "./types.js";
 
 const authority = await generateKeyPair();
@@ -89,4 +97,37 @@ test("the online RPC client uses only the configured URL, refuses redirects and 
 
   const huge = createRpcSettlementSource("https://rpc.example/", { fetchImpl: (async () => new Response("x".repeat(300 * 1024))) as typeof fetch });
   await assert.rejects(huge.getVersion(), /too large/);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5C service messages
+// ---------------------------------------------------------------------------
+
+
+test("service authorization headers round-trip strictly and verify only against the pinned authority", async () => {
+  const authorization = await signServiceAuthorization(
+    {
+      version: 1,
+      domain: SERVICE_AUTHORIZATION_DOMAIN,
+      authority: authorityAddress,
+      invocationId: "inv-1",
+      grantId: "g",
+      request: { method: "POST", url: "http://service/api/v1/report", contentType: "application/json", requestSha256: "a".repeat(64) },
+      operationDigest: "b".repeat(64),
+      payment: { network: "n", asset: "m", payTo: "p", amountAtomic: "10000" },
+      issuedAt: 1,
+      expiresAt: 2,
+    },
+    authority,
+  );
+  const decoded = decodeServiceAuthorizationHeader(encodeServiceHeader(authorization));
+  assert.deepEqual(decoded, authorization);
+  assert.equal(await verifyServiceAuthorizationSignature(decoded, authorityAddress), true);
+  assert.equal(await verifyServiceAuthorizationSignature(decoded, otherAddress), false);
+  assert.equal(await verifyServiceAuthorizationSignature({ ...decoded, invocationId: "inv-2" }, authorityAddress), false);
+
+  for (const header of ["", "!!!", "x".repeat(5000), Buffer.from('{"version":1}').toString("base64url"), encodeServiceHeader({ ...authorization, extra: 1 } as typeof authorization)]) {
+    assert.throws(() => decodeServiceAuthorizationHeader(header), EvidenceFormatError);
+    assert.throws(() => decodeServiceAcknowledgementHeader(header), EvidenceFormatError);
+  }
 });

@@ -41,3 +41,26 @@ export function loadIssuerEntitlement(path: string, settlementProfiles: readonly
 
   return Object.freeze({ issuer, settlementProfiles: Object.freeze([...settlementProfiles]) });
 }
+
+/**
+ * Loads one pinned public key (e.g. a paid service's acknowledgement key)
+ * from a read-only trust file. Same rules as the issuer trust file: exactly
+ * one base58 public key, otherwise startup fails closed.
+ */
+export function loadPinnedPublicKey(path: string, label: string): string {
+  let contents: string;
+
+  try {
+    contents = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(`${label} trust file ${path} could not be read (${error instanceof Error ? error.message : "unknown"}).`);
+  }
+
+  const key = contents.trim();
+
+  if (key.length === 0 || !isAddress(key)) {
+    throw new Error(`${label} trust file ${path} must contain exactly one base58 Ed25519 public key.`);
+  }
+
+  return key;
+}

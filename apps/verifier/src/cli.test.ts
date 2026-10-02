@@ -38,6 +38,8 @@ test("usage and trust-configuration errors exit 64 without verifying", async () 
     ["verify", bundle, "--issuer-trust", issuerFile, "--authority-trust", authorityFile, "--offline", "--online"],
     ["verify", bundle, "--issuer-trust", file("bad.pub", "not a key"), "--authority-trust", authorityFile],
     ["verify", join(dir, "missing.json"), "--issuer-trust", issuerFile, "--authority-trust", authorityFile],
+    ["verify", bundle, "--issuer-trust", issuerFile, "--authority-trust", authorityFile, "--service-trust", file("bad-service.pub", "nope")],
+    ["verify", bundle, "--issuer-trust", issuerFile, "--authority-trust", authorityFile, "--service-trust"],
   ]) {
     const { code, stderr } = await run(argv);
     assert.equal(code, 64, JSON.stringify(argv));

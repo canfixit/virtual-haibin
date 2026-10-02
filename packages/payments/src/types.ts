@@ -107,6 +107,11 @@ export type PaidResult = {
   bytes: number;
   /** The exact response body (base64) when within the size limit; lets evidence re-hash it. */
   bodyBase64?: string;
+  /**
+   * The paid service's `x-vh-service-acknowledgement` response header, raw
+   * and untrusted (bounded). The authority validates it before keeping it.
+   */
+  serviceAcknowledgementHeader?: string;
 };
 
 export type PaymentExecution = {
@@ -129,6 +134,11 @@ export type ExecuteInput = {
   requirement: PaymentRequirement;
   /** Correlation id sent to the service (the invocationId). */
   reference: string;
+  /**
+   * Authority-signed service authorization (header value), sent ONLY on the
+   * paid retry as `x-vh-authorization`. Never on the unpaid probe.
+   */
+  serviceAuthorizationHeader?: string;
   /** Called after the credential is built and checked, before it is transmitted. Must persist the attempt. */
   beforeSubmit: (attempt: PaymentAttempt) => Promise<void>;
 };

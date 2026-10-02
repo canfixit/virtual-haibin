@@ -65,9 +65,12 @@ test("compose: only the approver mounts the issuer key volume; the agent has no 
 });
 
 test("compose: the authority receipt key volume is authority-only; verifiers get public keys read-only and the offline verifier has no network", () => {
-  for (const service of ["agent", "web", "service-agent", "approver", "demo-driver"]) {
+  for (const service of ["agent", "web", "approver", "demo-driver"]) {
     assert.doesNotMatch(composeService(service), /authority_data|authority_trust/, `${service} must not mount authority key/trust volumes`);
   }
+  // The paid service pins the authority's PUBLIC key, read-only; never its data volume.
+  assert.doesNotMatch(composeService("service-agent"), /authority_data/);
+  assert.match(composeService("service-agent"), /authority_trust:\/trust\/authority:ro/);
 
   const authority = composeService("authority");
   assert.match(authority, /authority_data:\/data/);
@@ -80,4 +83,20 @@ test("compose: the authority receipt key volume is authority-only; verifiers get
   assert.match(verifierTemplate, /- \.:\/workspace:ro/);
   assert.doesNotMatch(verifierTemplate, /authority_data|approver_keys/);
   assert.match(composeService("verifier"), /network_mode: none/);
+});
+
+test("compose: the service signing key is service-only; others see only its public key, read-only", () => {
+  for (const service of ["agent", "web", "approver", "authority", "demo-driver", "verifier"]) {
+    assert.doesNotMatch(composeService(service), /service_keys/, `${service} must not mount the service key volume`);
+  }
+
+  const serviceAgent = composeService("service-agent");
+  assert.match(serviceAgent, /service_keys:\/keys/);
+  assert.match(serviceAgent, /SERVICE_KEY_FILE: "\/keys\//);
+  assert.match(composeService("authority"), /service_trust:\/service-trust:ro/);
+
+  const compose = readFileSync(join(repoRoot, "compose.yaml"), "utf8");
+  const verifierTemplate = compose.slice(compose.indexOf("x-verifier:"), compose.indexOf("x-dev-volumes:"));
+  assert.match(verifierTemplate, /service_trust:\/trust\/service:ro/);
+  assert.doesNotMatch(verifierTemplate, /service_keys/);
 });

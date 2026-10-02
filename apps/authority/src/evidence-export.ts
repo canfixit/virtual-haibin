@@ -1,11 +1,18 @@
 import {
   computeEvidenceDigests,
+  decodeServiceAcknowledgementHeader,
   EVIDENCE_BUNDLE_DOMAIN,
   EVIDENCE_BUNDLE_VERSION,
+  EVIDENCE_BUNDLE_VERSION_2,
   EVIDENCE_MANIFEST_DOMAIN,
   EVIDENCE_MANIFEST_VERSION,
+  EVIDENCE_MANIFEST_VERSION_2,
   signEvidenceManifest,
+  type EvidenceBundle,
   type EvidenceBundleV1,
+  type EvidenceDigests,
+  type EvidenceDigestsV2,
+  type UnsignedEvidenceManifestV1,
   type EvidenceOutboundRequest,
   type EvidenceResult,
   type PurchaseState,
@@ -43,7 +50,9 @@ export async function buildEvidenceBundle(input: {
   authorityAddress: string;
   signer: CryptoKeyPair;
   issuedAt: number;
-}): Promise<EvidenceBundleV1> {
+  /** 2 (default): includes the service authorization exchange. 1: legacy format. */
+  bundleVersion?: 1 | 2;
+}): Promise<EvidenceBundle> {
   const { invocation, authorityAddress } = input;
   const state = invocation.state;
 
@@ -90,7 +99,7 @@ export async function buildEvidenceBundle(input: {
   }
 
   const purchaseState: PurchaseState = state;
-  const artifacts = {
+  const v1Artifacts = {
     version: EVIDENCE_BUNDLE_VERSION,
     domain: EVIDENCE_BUNDLE_DOMAIN,
     environment: { settlementProfile: authorization.permit.network },
@@ -105,22 +114,38 @@ export async function buildEvidenceBundle(input: {
     result,
   } satisfies Omit<EvidenceBundleV1, "manifest">;
 
+  const manifestFields: Omit<UnsignedEvidenceManifestV1, "version" | "digests"> = {
+    domain: EVIDENCE_MANIFEST_DOMAIN,
+    authority: authorityAddress,
+    issuedAt: input.issuedAt,
+    settlementProfile: authorization.permit.network,
+    grantId: invocation.grantId,
+    invocationId: invocation.invocationId,
+    purchaseState,
+    decision: state === "DENIED" ? "DENY" : "ALLOW",
+    reasonCodes: invocation.reasonCodes,
+  };
+
+  if (input.bundleVersion === 1) {
+    const manifest = await signEvidenceManifest(
+      { ...manifestFields, version: EVIDENCE_MANIFEST_VERSION, digests: (await computeEvidenceDigests(v1Artifacts)) as EvidenceDigests },
+      input.signer,
+    );
+    return { ...v1Artifacts, manifest };
+  }
+
+  // The acknowledgement header was validated against the pinned service key
+  // before it was stored; anything else was dropped at payment time.
+  const acknowledgementHeader = state === "CONFIRMED" ? invocation.result?.serviceAcknowledgementHeader : undefined;
+  const v2Artifacts = {
+    ...v1Artifacts,
+    version: EVIDENCE_BUNDLE_VERSION_2,
+    serviceAuthorization: invocation.paymentAttempt === null ? null : invocation.serviceAuthorization,
+    serviceAcknowledgement: acknowledgementHeader === undefined ? null : decodeServiceAcknowledgementHeader(acknowledgementHeader),
+  } as const;
   const manifest = await signEvidenceManifest(
-    {
-      version: EVIDENCE_MANIFEST_VERSION,
-      domain: EVIDENCE_MANIFEST_DOMAIN,
-      authority: authorityAddress,
-      issuedAt: input.issuedAt,
-      settlementProfile: authorization.permit.network,
-      grantId: invocation.grantId,
-      invocationId: invocation.invocationId,
-      purchaseState,
-      decision: state === "DENIED" ? "DENY" : "ALLOW",
-      reasonCodes: invocation.reasonCodes,
-      digests: await computeEvidenceDigests(artifacts),
-    },
+    { ...manifestFields, version: EVIDENCE_MANIFEST_VERSION_2, digests: (await computeEvidenceDigests(v2Artifacts)) as EvidenceDigestsV2 },
     input.signer,
   );
-
-  return { ...artifacts, manifest };
+  return { ...v2Artifacts, manifest };
 }

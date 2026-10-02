@@ -54,6 +54,14 @@ export type MockPaymentProviderOptions = {
    * challenge terms (feePayer, asset, payTo).
    */
   payer?: KeyPairSigner;
+  /**
+   * Optional simulated paid service: called with the paid retry (incl. its
+   * `serviceAuthorizationHeader`) after settlement. Return
+   * `{ acknowledgementHeader }` to attach one, or throw to simulate a
+   * service that refuses before settling (the mock then reports the outcome
+   * as unknown, like a real non-200 after transmission).
+   */
+  service?: (input: ExecuteInput, response: { body: Buffer; sha256: string; transactionId: string }) => Promise<{ acknowledgementHeader?: string }>;
 };
 
 /** A valid base58 32-byte "sandbox" blockhash for mock transactions. */
@@ -75,11 +83,13 @@ export class MockPaymentProvider implements PaymentProvider {
   lookupWhenMissing: SettlementLookup = { status: "pending", currentBlockHeight: "0" };
   readonly #challenge: MockPaymentProviderOptions["challenge"];
   readonly #payer: KeyPairSigner | undefined;
+  readonly #service: MockPaymentProviderOptions["service"];
   #counter = 0;
 
   constructor(options: MockPaymentProviderOptions) {
     this.settlementProfile = options.settlementProfile ?? "solana-payment-sandbox";
     this.#payer = options.payer;
+    this.#service = options.service;
     this.payerAddress = options.payer?.address ?? options.payerAddress ?? "MockPayer1111111111111111111111111111111111";
     this.behavior = options.behavior ?? "settle";
     this.#challenge = options.challenge;
@@ -198,9 +208,20 @@ export class MockPaymentProvider implements PaymentProvider {
     // With a real payer key the payer's (base58) signature doubles as the
     // transaction id, so evidence built from it is well-formed.
     const transactionId = this.#payer === undefined ? `mock-tx-${n}` : payerSignature;
-    this.ledger.set(attempt.payerSignature, { transactionId, attempt });
-
     const body = Buffer.from(JSON.stringify({ result: `mock paid result ${n}`, request: JSON.parse(input.request.body) as unknown }));
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    let acknowledgementHeader: string | undefined;
+
+    if (this.#service !== undefined) {
+      try {
+        ({ acknowledgementHeader } = await this.#service(input, { body, sha256, transactionId }));
+      } catch (error) {
+        // A service that refuses after transmission: outcome unknown to the payer.
+        throw new PaymentOutcomeUnknownError(`mock service refused: ${error instanceof Error ? error.message : "unknown"}`, attempt);
+      }
+    }
+
+    this.ledger.set(attempt.payerSignature, { transactionId, attempt });
 
     return {
       attempt,
@@ -208,9 +229,10 @@ export class MockPaymentProvider implements PaymentProvider {
       result: {
         httpStatus: 200,
         json: JSON.parse(body.toString("utf8")) as unknown,
-        sha256: createHash("sha256").update(body).digest("hex"),
+        sha256,
         bytes: body.byteLength,
         bodyBase64: body.toString("base64"),
+        ...(acknowledgementHeader === undefined ? {} : { serviceAcknowledgementHeader: acknowledgementHeader }),
       },
     };
   }

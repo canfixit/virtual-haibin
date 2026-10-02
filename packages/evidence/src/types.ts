@@ -1,6 +1,7 @@
 import type { AgentRequestSignature, AuthorizationRequestV2, SignedPurchasePermitV2 } from "@virtual-haibin/mandate";
 import type { ConfirmedSettlement, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
 import type { SignedAuthorizationReceiptV2 } from "./receipt.js";
+import type { SignedServiceAcknowledgementV1, SignedServiceAuthorizationV1 } from "./service.js";
 
 /**
  * EvidenceBundleV1: the portable record of ONE Virtual Haibin purchase
@@ -15,8 +16,11 @@ import type { SignedAuthorizationReceiptV2 } from "./receipt.js";
  */
 export const EVIDENCE_BUNDLE_DOMAIN = "virtual-haibin/evidence-bundle";
 export const EVIDENCE_BUNDLE_VERSION = 1;
+/** v2 (Phase 5C) adds the authority->service authorization and the service's signed acknowledgement. */
+export const EVIDENCE_BUNDLE_VERSION_2 = 2;
 export const EVIDENCE_MANIFEST_DOMAIN = "virtual-haibin/evidence-manifest";
 export const EVIDENCE_MANIFEST_VERSION = 1;
+export const EVIDENCE_MANIFEST_VERSION_2 = 2;
 
 export const PURCHASE_STATES = ["CONFIRMED", "DENIED", "FAILED", "RECONCILIATION_REQUIRED"] as const;
 export type PurchaseState = (typeof PURCHASE_STATES)[number];
@@ -60,6 +64,11 @@ export type EvidenceDigests = {
   result: string | null;
 };
 
+export type EvidenceDigestsV2 = EvidenceDigests & {
+  serviceAuthorization: string | null;
+  serviceAcknowledgement: string | null;
+};
+
 export type UnsignedEvidenceManifestV1 = {
   version: typeof EVIDENCE_MANIFEST_VERSION;
   domain: typeof EVIDENCE_MANIFEST_DOMAIN;
@@ -80,6 +89,14 @@ export type EvidenceSignature = { algorithm: "ed25519"; signature: string };
 
 export type SignedEvidenceManifestV1 = UnsignedEvidenceManifestV1 & { signature: EvidenceSignature };
 
+export type UnsignedEvidenceManifestV2 = Omit<UnsignedEvidenceManifestV1, "version" | "digests"> & {
+  version: typeof EVIDENCE_MANIFEST_VERSION_2;
+  digests: EvidenceDigestsV2;
+};
+export type SignedEvidenceManifestV2 = UnsignedEvidenceManifestV2 & { signature: EvidenceSignature };
+export type UnsignedEvidenceManifest = UnsignedEvidenceManifestV1 | UnsignedEvidenceManifestV2;
+export type SignedEvidenceManifest = SignedEvidenceManifestV1 | SignedEvidenceManifestV2;
+
 export type EvidenceBundleV1 = {
   version: typeof EVIDENCE_BUNDLE_VERSION;
   domain: typeof EVIDENCE_BUNDLE_DOMAIN;
@@ -97,6 +114,20 @@ export type EvidenceBundleV1 = {
   result: EvidenceResult | null;
   manifest: SignedEvidenceManifestV1;
 };
+
+/** EvidenceBundleV2 (Phase 5C): v1 artifacts plus the service-side authorization exchange. */
+export type EvidenceBundleV2 = Omit<EvidenceBundleV1, "version" | "manifest"> & {
+  version: typeof EVIDENCE_BUNDLE_VERSION_2;
+  /** Authority-signed authorization sent with the paid retry (null when no payment was attempted). */
+  serviceAuthorization: SignedServiceAuthorizationV1 | null;
+  /** Service-signed acknowledgement of fulfillment (CONFIRMED only, when the service provided a valid one). */
+  serviceAcknowledgement: SignedServiceAcknowledgementV1 | null;
+  manifest: SignedEvidenceManifestV2;
+};
+
+export type EvidenceBundle = EvidenceBundleV1 | EvidenceBundleV2;
+/** A bundle's artifacts without its manifest (distributive over versions). */
+export type EvidenceArtifacts = Omit<EvidenceBundleV1, "manifest"> | Omit<EvidenceBundleV2, "manifest">;
 
 // ---------------------------------------------------------------------------
 // Verification result model

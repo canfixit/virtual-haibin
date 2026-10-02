@@ -3,7 +3,7 @@ import { getBase58Decoder, getBase58Encoder } from "@solana/codecs-strings";
 import { isSignature, signatureBytes, signBytes, verifySignature } from "@solana/keys";
 import canonicalize from "canonicalize";
 import { computeOperationDigest, computePermitDigest } from "@virtual-haibin/mandate";
-import type { EvidenceBundleV1, EvidenceDigests, SignedEvidenceManifestV1, UnsignedEvidenceManifestV1 } from "./types.js";
+import type { EvidenceArtifacts, EvidenceDigests, EvidenceDigestsV2, SignedEvidenceManifest, UnsignedEvidenceManifest } from "./types.js";
 import { EVIDENCE_MANIFEST_DOMAIN } from "./types.js";
 
 const ARTIFACT_DOMAIN = "virtual-haibin/evidence-artifact";
@@ -33,10 +33,10 @@ export async function artifactDigest(name: string, value: unknown): Promise<stri
  * permit and operation reuse their protocol digests (the same values the
  * agent's request binds to), so the manifest and request agree on identity.
  */
-export async function computeEvidenceDigests(bundle: Omit<EvidenceBundleV1, "manifest">): Promise<EvidenceDigests> {
+export async function computeEvidenceDigests(bundle: EvidenceArtifacts): Promise<EvidenceDigests | EvidenceDigestsV2> {
   const optional = async (name: string, value: unknown) => (value === null ? null : artifactDigest(name, value));
 
-  return {
+  const v1: EvidenceDigests = {
     purchasePermit: await computePermitDigest(bundle.purchasePermit),
     authorizationRequest: await artifactDigest("authorization-request", bundle.authorizationRequest),
     operation: await computeOperationDigest(bundle.authorizationRequest.request.operation),
@@ -47,14 +47,24 @@ export async function computeEvidenceDigests(bundle: Omit<EvidenceBundleV1, "man
     settlement: await optional("settlement", bundle.settlement),
     result: await optional("result", bundle.result),
   };
+
+  if (bundle.version === 1) {
+    return v1;
+  }
+
+  return {
+    ...v1,
+    serviceAuthorization: await optional("service-authorization", bundle.serviceAuthorization),
+    serviceAcknowledgement: await optional("service-acknowledgement", bundle.serviceAcknowledgement),
+  };
 }
 
-export function canonicalizeManifest(manifest: UnsignedEvidenceManifestV1): Uint8Array {
+export function canonicalizeManifest(manifest: UnsignedEvidenceManifest): Uint8Array {
   return canonicalBytes(`${EVIDENCE_MANIFEST_DOMAIN}:v${manifest.version}\n`, manifest);
 }
 
 /** Signs a manifest with the authority's persistent receipt key. */
-export async function signEvidenceManifest(unsigned: UnsignedEvidenceManifestV1, signer: CryptoKeyPair): Promise<SignedEvidenceManifestV1> {
+export async function signEvidenceManifest<M extends UnsignedEvidenceManifest>(unsigned: M, signer: CryptoKeyPair): Promise<M & { signature: { algorithm: "ed25519"; signature: string } }> {
   if ((await getAddressFromPublicKey(signer.publicKey)) !== unsigned.authority) {
     throw new Error("Manifest signer does not match the manifest's authority field.");
   }
@@ -68,7 +78,7 @@ export async function signEvidenceManifest(unsigned: UnsignedEvidenceManifestV1,
  * own `authority` field must equal the pinned key; it is never used as the
  * verification key by itself. Fails closed.
  */
-export async function verifyEvidenceManifestSignature(manifest: SignedEvidenceManifestV1, pinnedAuthority: string): Promise<boolean> {
+export async function verifyEvidenceManifestSignature(manifest: SignedEvidenceManifest, pinnedAuthority: string): Promise<boolean> {
   try {
     if (manifest.authority !== pinnedAuthority || manifest.signature.algorithm !== "ed25519" || !isSignature(manifest.signature.signature)) {
       return false;

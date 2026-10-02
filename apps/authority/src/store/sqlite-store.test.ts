@@ -501,7 +501,7 @@ test("a v1 database migrates to the current schema atomically and keeps all exis
 
   // Rewind to the Phase 3 (v1) schema.
   const raw = new DatabaseSync(path);
-  for (const column of ["payment_requirement_json", "payment_attempt_json", "settlement_json", "result_json", "authorization_json"]) {
+  for (const column of ["payment_requirement_json", "payment_attempt_json", "settlement_json", "result_json", "authorization_json", "service_authorization_json"]) {
     raw.exec(`ALTER TABLE invocations DROP COLUMN ${column}`);
   }
   raw.exec("PRAGMA user_version = 1");
@@ -522,7 +522,7 @@ test("a v1 database migrates to the current schema atomically and keeps all exis
   assert.equal(version, SQLITE_SCHEMA_VERSION);
 });
 
-test("a v2 database migrates to v3; legacy rows have no authorization evidence, new rows keep it", async () => {
+test("a v2 database migrates to the current schema; legacy rows have no authorization evidence, new rows keep it", async () => {
   const path = tempDbPath();
   const current = new SqliteAuthorityStore(path);
   await current.reserve(reserveInput("inv-v2", "10000"), allowAll);
@@ -530,6 +530,7 @@ test("a v2 database migrates to v3; legacy rows have no authorization evidence, 
 
   const raw = new DatabaseSync(path);
   raw.exec("ALTER TABLE invocations DROP COLUMN authorization_json");
+  raw.exec("ALTER TABLE invocations DROP COLUMN service_authorization_json");
   raw.exec("PRAGMA user_version = 2");
   raw.close();
 

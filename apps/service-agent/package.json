@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test 'src/**/*.test.ts'"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -15,6 +16,8 @@
   "dependencies": {
     "@solana/kit": "^6.10.0",
     "@solana/pay-kit": "0.12.0",
+    "@virtual-haibin/evidence": "workspace:*",
+    "@virtual-haibin/identity": "workspace:*",
     "express": "^5.2.1"
   }
 }

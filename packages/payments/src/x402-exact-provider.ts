@@ -43,6 +43,7 @@ const CANONICAL_AMOUNT = /^(0|[1-9][0-9]{0,19})$/;
 const MAX_U64 = 18446744073709551615n;
 const MAX_ACCEPTS = 16;
 const MAX_CHALLENGE_BODY_BYTES = 64 * 1024;
+const MAX_ACKNOWLEDGEMENT_CHARS = 4096;
 
 export type X402ExactPaymentProviderOptions = {
   profile: SettlementProfile;
@@ -271,6 +272,7 @@ export class X402ExactPaymentProvider implements PaymentProvider {
           accept: "application/json",
           "content-type": request.contentType,
           "x-vh-invocation-id": reference,
+          ...(input.serviceAuthorizationHeader === undefined ? {} : { "x-vh-authorization": input.serviceAuthorizationHeader }),
           ...this.#http.encodePaymentSignatureHeader(payload),
         },
         body: request.body,
@@ -309,7 +311,15 @@ export class X402ExactPaymentProvider implements PaymentProvider {
     // The facilitator's report is untrusted: confirm on the pinned RPC.
     const settlement = await this.#awaitConfirmation(attempt, reported);
 
-    return { attempt, settlement, result: this.#summarizeResult(response.status, bodyBytes) };
+    const result = this.#summarizeResult(response.status, bodyBytes);
+    const acknowledgement = response.headers.get("x-vh-service-acknowledgement");
+
+    // Raw and untrusted; bounded here, validated by the authority.
+    if (acknowledgement !== null && acknowledgement.length <= MAX_ACKNOWLEDGEMENT_CHARS) {
+      result.serviceAcknowledgementHeader = acknowledgement;
+    }
+
+    return { attempt, settlement, result };
   }
 
   async lookupSettlement(attempt: PaymentAttempt): Promise<SettlementLookup> {

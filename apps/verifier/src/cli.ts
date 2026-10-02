@@ -10,10 +10,13 @@ import {
 import { solanaPaymentSandboxProfile, SOLANA_PAYMENT_SANDBOX_DEFAULT_RPC_URL } from "@virtual-haibin/payments";
 
 export const USAGE = `Usage:
-  verify <bundle.json> --issuer-trust <file> --authority-trust <file> [--offline | --online [--rpc <url>]] [--json]
+  verify <bundle.json> --issuer-trust <file> --authority-trust <file> [--service-trust <file>]
+         [--offline | --online [--rpc <url>]] [--json]
 
   --issuer-trust     file holding the pinned human-issuer public key (base58)
   --authority-trust  file holding the pinned Virtual Haibin authority public key (base58)
+  --service-trust    optional: file holding the pinned paid-service public key; when given, a
+                     CONFIRMED v2 bundle must carry that service's signed acknowledgement
   --offline          (default) no network access at all
   --online           additionally observe settlement on the configured sandbox RPC
   --rpc              settlement RPC for --online (default ${SOLANA_PAYMENT_SANDBOX_DEFAULT_RPC_URL});
@@ -31,7 +34,7 @@ export type CliIo = {
 
 class UsageError extends Error {}
 
-type Args = { bundle: string; issuerTrust: string; authorityTrust: string; online: boolean; rpc: string; json: boolean };
+type Args = { bundle: string; issuerTrust: string; authorityTrust: string; serviceTrust?: string; online: boolean; rpc: string; json: boolean };
 
 function parseArgs(argv: string[]): Args {
   const [command, ...rest] = argv;
@@ -58,6 +61,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--authority-trust":
         args.authorityTrust = value();
+        break;
+      case "--service-trust":
+        args.serviceTrust = value();
         break;
       case "--rpc":
         args.rpc = value();
@@ -125,11 +131,13 @@ export async function runVerifierCli(argv: string[], io: CliIo): Promise<number>
   let bundle: string;
   let issuer: string;
   let authority: string;
+  let service: string | undefined;
 
   try {
     args = parseArgs(argv);
     issuer = readTrustKey(args.issuerTrust, "issuer");
     authority = readTrustKey(args.authorityTrust, "authority");
+    service = args.serviceTrust === undefined ? undefined : readTrustKey(args.serviceTrust, "service");
     bundle = readBundle(args.bundle);
   } catch (error) {
     io.stderr(`error: ${error instanceof Error ? error.message : "invalid arguments"}\n\n${USAGE}\n`);
@@ -137,7 +145,7 @@ export async function runVerifierCli(argv: string[], io: CliIo): Promise<number>
   }
 
   const profile = solanaPaymentSandboxProfile(args.rpc);
-  const trust = { issuer, authority, settlementProfiles: new Map([[profile.permitNetwork, profile]]) };
+  const trust = { issuer, authority, settlementProfiles: new Map([[profile.permitNetwork, profile]]), ...(service === undefined ? {} : { service }) };
   const report = await verifyEvidenceBundle(
     bundle,
     trust,

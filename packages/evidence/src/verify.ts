@@ -20,7 +20,8 @@ import { evaluateExactOperation, evaluatePurchasePermit } from "@virtual-haibin/
 import { computeEvidenceDigests, verifyEvidenceManifestSignature } from "./manifest.js";
 import { EvidenceFormatError, parseEvidenceBundle } from "./parse.js";
 import { verifyAuthorizationReceiptSignature } from "./receipt.js";
-import type { Claim, ClaimCategory, ClaimStatus, EvidenceBundleV1, EvidenceDigests, VerificationReport } from "./types.js";
+import { serviceAuthorizationDigest, verifyServiceAcknowledgementSignature, verifyServiceAuthorizationSignature } from "./service.js";
+import type { Claim, ClaimCategory, ClaimStatus, EvidenceBundle, VerificationReport } from "./types.js";
 
 /**
  * Verifier trust configuration. Everything here comes from the verifier's
@@ -34,6 +35,11 @@ export type VerifierTrust = {
   authority: string;
   /** Known settlement profiles by name (offline facts: accepted networks, assets, scheme, blockhash prefix). */
   settlementProfiles: ReadonlyMap<string, SettlementProfile>;
+  /**
+   * Optional pinned paid-service public key (base58). When set, a CONFIRMED
+   * v2 bundle must carry that service's valid signed acknowledgement.
+   */
+  service?: string;
 };
 
 /** Read-only access to the verifier-configured settlement RPC (online mode only). */
@@ -96,7 +102,7 @@ function overallOf(claims: Claim[]): VerificationReport["overall"] {
  */
 export async function verifyEvidenceBundle(input: unknown, trust: VerifierTrust, options: VerifyOptions = { mode: "offline" }): Promise<VerificationReport> {
   const claims = new Claims();
-  let bundle: EvidenceBundleV1;
+  let bundle: EvidenceBundle;
 
   try {
     bundle = parseEvidenceBundle(input);
@@ -106,7 +112,7 @@ export async function verifyEvidenceBundle(input: unknown, trust: VerifierTrust,
     return { overall: "INVALID", mode: options.mode, decision: null, purchaseState: null, invocationId: null, claims: claims.list, notProven: [...NOT_PROVEN] };
   }
 
-  claims.add("bundle_format", "FORMAT", "VERIFIED", true, "EvidenceBundleV1, strict schema");
+  claims.add("bundle_format", "FORMAT", "VERIFIED", true, `EvidenceBundleV${bundle.version}, strict schema`);
 
   try {
     await verifyParsed(bundle, trust, options, claims);
@@ -126,7 +132,7 @@ export async function verifyEvidenceBundle(input: unknown, trust: VerifierTrust,
   };
 }
 
-async function verifyParsed(bundle: EvidenceBundleV1, trust: VerifierTrust, options: VerifyOptions, claims: Claims): Promise<void> {
+async function verifyParsed(bundle: EvidenceBundle, trust: VerifierTrust, options: VerifyOptions, claims: Claims): Promise<void> {
   const { manifest, purchasePermit: permit, authorityDecision: receipt, paymentRequirement: requirement, paymentAttempt: attempt } = bundle;
   const { request, agentSignature } = bundle.authorizationRequest;
   const state = manifest.purchaseState;
@@ -157,8 +163,10 @@ async function verifyParsed(bundle: EvidenceBundleV1, trust: VerifierTrust, opti
 
   const { manifest: _manifest, ...artifacts } = bundle;
   const recomputed = await computeEvidenceDigests(artifacts);
-  const digestProblems = (Object.keys(recomputed) as Array<keyof EvidenceDigests>)
-    .filter((name) => recomputed[name] !== manifest.digests[name])
+  const recomputedDigests = recomputed as Record<string, string | null>;
+  const signedDigests = manifest.digests as Record<string, string | null>;
+  const digestProblems = [...new Set([...Object.keys(recomputedDigests), ...Object.keys(signedDigests)])]
+    .filter((name) => recomputedDigests[name] !== signedDigests[name])
     .map((name) => `${name} digest does not match the signed manifest`);
   claims.check("artifact_digests", "INTEGRITY", digestProblems, true, "INVALID", "every bundled artifact re-hashes to its manifest digest");
 
@@ -188,6 +196,10 @@ async function verifyParsed(bundle: EvidenceBundleV1, trust: VerifierTrust, opti
   }
   if (state === "RECONCILIATION_REQUIRED" && attempt === null) stateProblems.push("RECONCILIATION_REQUIRED requires the recorded payment attempt");
   if (state === "DENIED" && attempt !== null) stateProblems.push("DENIED must not carry a payment attempt");
+  if (bundle.version === 2) {
+    if (bundle.serviceAcknowledgement !== null && !confirmed) stateProblems.push(`state ${state} must not carry a service acknowledgement`);
+    if (bundle.serviceAuthorization !== null && attempt === null) stateProblems.push("a service authorization requires a payment attempt");
+  }
   claims.check("state_consistent", "INTEGRITY", stateProblems, true, "INVALID", `${state}: identifiers and artifacts agree`);
 
   // ---- AUTHORIZATION ------------------------------------------------------
@@ -402,7 +414,6 @@ async function verifyParsed(bundle: EvidenceBundleV1, trust: VerifierTrust, opti
     claims.check("result_digest", "RESULT", problems, true, "INVALID", "bundled result bytes hash to the recorded SHA-256");
     claims.add("result_observed_by_authority", "RESULT", "AUTHORITY_ATTESTED", false, "the authority's signed manifest binds this result to the invocation; the service did not sign it");
   }
-  claims.add("service_result_attestation", "SERVICE", "NOT_PROVABLE_FROM_BUNDLE", false, "the paid service does not sign its result yet (Phase 5C); correctness of the content is never provable here");
 
   // ---- BUDGET ---------------------------------------------------------------
   claims.add(
@@ -416,11 +427,114 @@ async function verifyParsed(bundle: EvidenceBundleV1, trust: VerifierTrust, opti
   );
   claims.add("global_budget_completeness", "BUDGET", "NOT_PROVABLE_FROM_BUNDLE", false, "one bundle does not contain the grant's complete invocation history");
 
+  // ---- SERVICE (Phase 5C) ---------------------------------------------------
+  await serviceClaims(bundle, trust, claims);
+
   // ---- SETTLEMENT -----------------------------------------------------------
   await settlementClaims(bundle, profile, options, claims);
 }
 
-async function settlementClaims(bundle: EvidenceBundleV1, profile: SettlementProfile | undefined, options: VerifyOptions, claims: Claims): Promise<void> {
+async function serviceClaims(bundle: EvidenceBundle, trust: VerifierTrust, claims: Claims): Promise<void> {
+  const correctness = () =>
+    claims.add("result_correctness", "SERVICE", "NOT_PROVABLE_FROM_BUNDLE", false, "whether the returned information is correct is never provable from signatures");
+
+  if (bundle.version === 1) {
+    for (const id of ["service_authorization", "service_trusted", "service_acknowledgement"]) {
+      claims.add(id, "SERVICE", "NOT_CHECKED", false, "EvidenceBundleV1 predates the service authorization exchange");
+    }
+    claims.add("service_result_attestation", "SERVICE", "NOT_PROVABLE_FROM_BUNDLE", false, "no service signature in a v1 bundle");
+    correctness();
+    return;
+  }
+
+  const { serviceAuthorization: authorization, serviceAcknowledgement: ack, outboundRequest: outbound, paymentRequirement: requirement } = bundle;
+  const { request } = bundle.authorizationRequest;
+  const confirmed = bundle.manifest.purchaseState === "CONFIRMED";
+
+  // What the authority told the service (verifiable with the pinned AUTHORITY key).
+  if (authorization === null) {
+    claims.add("service_authorization", "SERVICE", "NOT_CHECKED", false, bundle.paymentAttempt === null ? "no payment was attempted" : "no service authorization recorded for this attempt");
+  } else {
+    const problems: string[] = [];
+    if (!(await verifyServiceAuthorizationSignature(authorization, trust.authority))) problems.push("authorization is not signed by the pinned authority");
+    if (authorization.invocationId !== bundle.identifiers.invocationId || authorization.grantId !== bundle.identifiers.grantId) problems.push("authorization identifiers differ");
+    if (outbound === null || authorization.request.url !== outbound.url || authorization.request.requestSha256 !== outbound.sha256) problems.push("authorization covers a different HTTP request");
+    if (authorization.operationDigest !== (await computeOperationDigest(request.operation))) problems.push("authorization covers a different operation");
+    if (
+      requirement === null ||
+      authorization.payment.network !== requirement.network ||
+      authorization.payment.asset !== requirement.asset ||
+      authorization.payment.payTo !== requirement.payTo ||
+      authorization.payment.amountAtomic !== requirement.amountAtomic
+    ) {
+      problems.push("authorization payment terms differ from the x402 requirement");
+    }
+    claims.check("service_authorization", "SERVICE", problems, true, "INVALID", "authority-signed service authorization for exactly this request, operation and payment");
+  }
+
+  // What the service said back (verifiable only with a PINNED service key).
+  if (trust.service === undefined) {
+    claims.add("service_trusted", "SERVICE", "NOT_CHECKED", false, "no service key pinned (--service-trust)");
+    claims.add("service_acknowledgement", "SERVICE", "NOT_CHECKED", false, ack === null ? "no service acknowledgement" : "present, but no service key pinned to verify it");
+    claims.add("service_result_attestation", "SERVICE", "NOT_PROVABLE_FROM_BUNDLE", false, "no pinned service key");
+    correctness();
+    return;
+  }
+
+  if (!confirmed) {
+    claims.add("service_trusted", "SERVICE", "NOT_CHECKED", false, `no fulfillment for state ${bundle.manifest.purchaseState}`);
+    claims.add("service_acknowledgement", "SERVICE", "NOT_CHECKED", false, `no fulfillment for state ${bundle.manifest.purchaseState}`);
+    claims.add("service_result_attestation", "SERVICE", "NOT_PROVABLE_FROM_BUNDLE", false, "nothing was fulfilled");
+    correctness();
+    return;
+  }
+
+  if (ack === null) {
+    claims.add("service_trusted", "SERVICE", "INVALID", true, "a service key is pinned but the bundle has no service acknowledgement");
+    claims.add("service_acknowledgement", "SERVICE", "INVALID", true, "missing");
+    claims.add("service_result_attestation", "SERVICE", "NOT_PROVABLE_FROM_BUNDLE", false, "no service acknowledgement");
+    correctness();
+    return;
+  }
+
+  claims.check("service_trusted", "SERVICE", ack.service === trust.service ? [] : [`acknowledgement service ${ack.service} is not the pinned service`], true, "INVALID", "acknowledgement names the pinned service key");
+
+  const problems: string[] = [];
+  if (!(await verifyServiceAcknowledgementSignature(ack, trust.service))) problems.push("acknowledgement is not signed by the pinned service key");
+  if (ack.invocationId !== bundle.identifiers.invocationId) problems.push("acknowledgement is for another invocation");
+  if (authorization === null || ack.authorizationDigest !== (await serviceAuthorizationDigest(authorization))) problems.push("acknowledgement accepted a different authorization");
+  if (outbound === null || ack.requestSha256 !== outbound.sha256) problems.push("service received a different HTTP request");
+  const op = request.operation;
+  if (ack.received.method !== op.method || ack.received.resource !== op.resource || ack.received.operation !== op.operation || ack.received.datasetId !== op.datasetId) {
+    problems.push("service reports performing a different operation");
+  }
+  if (requirement === null || ack.payment.asset !== requirement.asset || ack.payment.payTo !== requirement.payTo || ack.payment.amountAtomic !== requirement.amountAtomic) {
+    problems.push("service reports different payment terms");
+  }
+  if (ack.payment.transaction !== bundle.settlement?.transactionId) problems.push("service reports a different payment transaction");
+  const result = bundle.result;
+  if (result === null || ack.result.sha256 !== result.sha256 || ack.result.bytes !== result.bytes || ack.result.httpStatus !== result.httpStatus) {
+    problems.push("service signed different result bytes than the bundle carries");
+  }
+  claims.check(
+    "service_acknowledgement",
+    "SERVICE",
+    problems,
+    true,
+    "INVALID",
+    `signed by the pinned service: accepted this authorization, performed ${op.operation}(${op.datasetId}), paid by ${ack.payment.transaction ?? "?"}, returned these result bytes`,
+  );
+  claims.add(
+    "service_result_attestation",
+    "SERVICE",
+    problems.length === 0 ? "SERVICE_ATTESTED" : "INVALID",
+    false,
+    "the service (not only the authority) attests it produced exactly this result for this paid request",
+  );
+  correctness();
+}
+
+async function settlementClaims(bundle: EvidenceBundle, profile: SettlementProfile | undefined, options: VerifyOptions, claims: Claims): Promise<void> {
   const state = bundle.manifest.purchaseState;
   const attempt = bundle.paymentAttempt;
   const settlement = bundle.settlement;

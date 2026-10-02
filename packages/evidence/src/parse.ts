@@ -1,19 +1,22 @@
 import type { ConfirmedSettlement, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
 import type { AuthorizationRequestV2, ExactOperationV1, SignedPurchasePermitV2 } from "@virtual-haibin/mandate";
 import type { SignedAuthorizationReceiptV2 } from "./receipt.js";
+import type { SignedServiceAcknowledgementV1, SignedServiceAuthorizationV1 } from "./service.js";
 import {
   EVIDENCE_BUNDLE_DOMAIN,
   EVIDENCE_BUNDLE_VERSION,
+  EVIDENCE_BUNDLE_VERSION_2,
   EVIDENCE_MANIFEST_DOMAIN,
   EVIDENCE_MANIFEST_VERSION,
+  EVIDENCE_MANIFEST_VERSION_2,
   PURCHASE_STATES,
   type EvidenceAuthorizationRequest,
-  type EvidenceBundleV1,
-  type EvidenceDigests,
+  type EvidenceBundle,
+  type EvidenceDigestsV2,
   type EvidenceOutboundRequest,
   type EvidenceResult,
   type PurchaseState,
-  type SignedEvidenceManifestV1,
+  type SignedEvidenceManifest,
 } from "./types.js";
 
 /**
@@ -403,7 +406,7 @@ const DIGEST_FIELDS = [
   "result",
 ] as const;
 
-function manifest(value: unknown, path: string): SignedEvidenceManifestV1 {
+function manifest(value: unknown, path: string, version: 1 | 2): SignedEvidenceManifest {
   const r = object(value, path, [
     "version",
     "domain",
@@ -418,9 +421,9 @@ function manifest(value: unknown, path: string): SignedEvidenceManifestV1 {
     "digests",
     "signature",
   ]);
-  const d = object(r.digests, `${path}.digests`, DIGEST_FIELDS);
+  const d = object(r.digests, `${path}.digests`, version === 2 ? [...DIGEST_FIELDS, "serviceAuthorization", "serviceAcknowledgement"] : DIGEST_FIELDS);
   const hex = (v: unknown, p: string) => string(v, p, 64, HEX64);
-  const digests: EvidenceDigests = {
+  const digests: EvidenceDigestsV2 = {
     purchasePermit: hex(d.purchasePermit, `${path}.digests.purchasePermit`),
     authorizationRequest: hex(d.authorizationRequest, `${path}.digests.authorizationRequest`),
     operation: hex(d.operation, `${path}.digests.operation`),
@@ -430,14 +433,15 @@ function manifest(value: unknown, path: string): SignedEvidenceManifestV1 {
     paymentAttempt: nullable(d.paymentAttempt, (v) => hex(v, `${path}.digests.paymentAttempt`)),
     settlement: nullable(d.settlement, (v) => hex(v, `${path}.digests.settlement`)),
     result: nullable(d.result, (v) => hex(v, `${path}.digests.result`)),
+    serviceAuthorization: version === 2 ? nullable(d.serviceAuthorization, (v) => hex(v, `${path}.digests.serviceAuthorization`)) : null,
+    serviceAcknowledgement: version === 2 ? nullable(d.serviceAcknowledgement, (v) => hex(v, `${path}.digests.serviceAcknowledgement`)) : null,
   };
 
   if (typeof r.purchaseState !== "string" || !(PURCHASE_STATES as readonly string[]).includes(r.purchaseState)) {
     fail(`${path}.purchaseState`, `must be one of ${PURCHASE_STATES.join(", ")}`);
   }
 
-  return {
-    version: literal(r.version, EVIDENCE_MANIFEST_VERSION, `${path}.version`),
+  const common = {
     domain: literal(r.domain, EVIDENCE_MANIFEST_DOMAIN, `${path}.domain`),
     authority: string(r.authority, `${path}.authority`, 64, BASE58),
     issuedAt: integer(r.issuedAt, `${path}.issuedAt`, 1),
@@ -447,13 +451,83 @@ function manifest(value: unknown, path: string): SignedEvidenceManifestV1 {
     purchaseState: r.purchaseState as PurchaseState,
     decision: decision(r.decision, `${path}.decision`),
     reasonCodes: reasonCodes(r.reasonCodes, `${path}.reasonCodes`),
-    digests,
+    signature: signature(r.signature, `${path}.signature`),
+  };
+
+  if (version === 2) {
+    return { ...common, version: literal(r.version, EVIDENCE_MANIFEST_VERSION_2, `${path}.version`), digests };
+  }
+
+  const { serviceAuthorization: _a, serviceAcknowledgement: _b, ...v1Digests } = digests;
+  return { ...common, version: literal(r.version, EVIDENCE_MANIFEST_VERSION, `${path}.version`), digests: v1Digests };
+}
+
+export function parseServiceAuthorization(value: unknown, path: string): SignedServiceAuthorizationV1 {
+  const r = object(value, path, ["version", "domain", "authority", "invocationId", "grantId", "request", "operationDigest", "payment", "issuedAt", "expiresAt", "signature"]);
+  const q = object(r.request, `${path}.request`, ["method", "url", "contentType", "requestSha256"]);
+  const pay = object(r.payment, `${path}.payment`, ["network", "asset", "payTo", "amountAtomic"]);
+  return {
+    version: literal(r.version, 1, `${path}.version`),
+    domain: literal(r.domain, "virtual-haibin/service-authorization", `${path}.domain`),
+    authority: string(r.authority, `${path}.authority`, 64, BASE58),
+    invocationId: string(r.invocationId, `${path}.invocationId`, 128),
+    grantId: string(r.grantId, `${path}.grantId`, 128),
+    request: {
+      method: literal(q.method, "POST", `${path}.request.method`),
+      url: string(q.url, `${path}.request.url`, MAX_URL),
+      contentType: literal(q.contentType, "application/json", `${path}.request.contentType`),
+      requestSha256: string(q.requestSha256, `${path}.request.requestSha256`, 64, HEX64),
+    },
+    operationDigest: string(r.operationDigest, `${path}.operationDigest`, 64, HEX64),
+    payment: {
+      network: string(pay.network, `${path}.payment.network`, 128),
+      asset: string(pay.asset, `${path}.payment.asset`, 64),
+      payTo: string(pay.payTo, `${path}.payment.payTo`, 64),
+      amountAtomic: string(pay.amountAtomic, `${path}.payment.amountAtomic`, 20, ATOMIC),
+    },
+    issuedAt: integer(r.issuedAt, `${path}.issuedAt`, 1),
+    expiresAt: integer(r.expiresAt, `${path}.expiresAt`, 1),
     signature: signature(r.signature, `${path}.signature`),
   };
 }
 
-/** Parses an untrusted bundle (JSON text or already-parsed value). Throws EvidenceFormatError only. */
-export function parseEvidenceBundle(input: unknown): EvidenceBundleV1 {
+export function parseServiceAcknowledgement(value: unknown, path: string): SignedServiceAcknowledgementV1 {
+  const r = object(value, path, ["version", "domain", "service", "invocationId", "authorizationDigest", "requestSha256", "received", "payment", "result", "fulfilledAt", "signature"]);
+  const rec = object(r.received, `${path}.received`, ["method", "resource", "operation", "datasetId"]);
+  const pay = object(r.payment, `${path}.payment`, ["transaction", "asset", "payTo", "amountAtomic"]);
+  const res = object(r.result, `${path}.result`, ["httpStatus", "contentType", "sha256", "bytes"]);
+  return {
+    version: literal(r.version, 1, `${path}.version`),
+    domain: literal(r.domain, "virtual-haibin/service-acknowledgement", `${path}.domain`),
+    service: string(r.service, `${path}.service`, 64, BASE58),
+    invocationId: string(r.invocationId, `${path}.invocationId`, 128),
+    authorizationDigest: string(r.authorizationDigest, `${path}.authorizationDigest`, 64, HEX64),
+    requestSha256: string(r.requestSha256, `${path}.requestSha256`, 64, HEX64),
+    received: {
+      method: string(rec.method, `${path}.received.method`, 16),
+      resource: string(rec.resource, `${path}.received.resource`, 256),
+      operation: string(rec.operation, `${path}.received.operation`, 64),
+      datasetId: string(rec.datasetId, `${path}.received.datasetId`, 128),
+    },
+    payment: {
+      transaction: nullable(pay.transaction, (v) => string(v, `${path}.payment.transaction`, 128, BASE58)),
+      asset: string(pay.asset, `${path}.payment.asset`, 64),
+      payTo: string(pay.payTo, `${path}.payment.payTo`, 64),
+      amountAtomic: string(pay.amountAtomic, `${path}.payment.amountAtomic`, 20, ATOMIC),
+    },
+    result: {
+      httpStatus: integer(res.httpStatus, `${path}.result.httpStatus`, 100),
+      contentType: literal(res.contentType, "application/json", `${path}.result.contentType`),
+      sha256: string(res.sha256, `${path}.result.sha256`, 64, HEX64),
+      bytes: integer(res.bytes, `${path}.result.bytes`),
+    },
+    fulfilledAt: integer(r.fulfilledAt, `${path}.fulfilledAt`, 1),
+    signature: signature(r.signature, `${path}.signature`),
+  };
+}
+
+/** Parses an untrusted bundle (JSON text or already-parsed value), v1 or v2. Throws EvidenceFormatError only. */
+export function parseEvidenceBundle(input: unknown): EvidenceBundle {
   let value = input;
 
   if (typeof input === "string") {
@@ -468,7 +542,10 @@ export function parseEvidenceBundle(input: unknown): EvidenceBundleV1 {
     }
   }
 
-  const r = object(value, "$", [
+  // Version/domain first: an unknown format is rejected before anything else.
+  const peek = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Json).version : undefined;
+  const version = peek === EVIDENCE_BUNDLE_VERSION_2 ? 2 : peek === EVIDENCE_BUNDLE_VERSION ? 1 : fail("$.version", "must be 1 or 2");
+  const v1Fields = [
     "version",
     "domain",
     "environment",
@@ -482,16 +559,13 @@ export function parseEvidenceBundle(input: unknown): EvidenceBundleV1 {
     "settlement",
     "result",
     "manifest",
-  ]);
-
-  // Version/domain first: an unknown format is rejected before anything else.
-  const version = literal(r.version, EVIDENCE_BUNDLE_VERSION, "$.version");
+  ];
+  const r = object(value, "$", version === 2 ? [...v1Fields, "serviceAuthorization", "serviceAcknowledgement"] : v1Fields);
   const domain = literal(r.domain, EVIDENCE_BUNDLE_DOMAIN, "$.domain");
   const environment = object(r.environment, "$.environment", ["settlementProfile"]);
   const identifiers = object(r.identifiers, "$.identifiers", ["grantId", "invocationId"]);
 
-  return {
-    version,
+  const common = {
     domain,
     environment: { settlementProfile: string(environment.settlementProfile, "$.environment.settlementProfile", 64) },
     identifiers: {
@@ -506,6 +580,23 @@ export function parseEvidenceBundle(input: unknown): EvidenceBundleV1 {
     paymentAttempt: nullable(r.paymentAttempt, (v) => paymentAttempt(v, "$.paymentAttempt")),
     settlement: nullable(r.settlement, (v) => settlement(v, "$.settlement")),
     result: nullable(r.result, (v) => result(v, "$.result")),
-    manifest: manifest(r.manifest, "$.manifest"),
   };
+
+  const parsedManifest = manifest(r.manifest, "$.manifest", version);
+
+  if (version === 2 && parsedManifest.version === 2) {
+    return {
+      ...common,
+      version: 2,
+      serviceAuthorization: nullable(r.serviceAuthorization, (v) => parseServiceAuthorization(v, "$.serviceAuthorization")),
+      serviceAcknowledgement: nullable(r.serviceAcknowledgement, (v) => parseServiceAcknowledgement(v, "$.serviceAcknowledgement")),
+      manifest: parsedManifest,
+    };
+  }
+
+  if (version === 1 && parsedManifest.version === 1) {
+    return { ...common, version: 1, manifest: parsedManifest };
+  }
+
+  return fail("$.manifest.version", "must match the bundle version");
 }
