@@ -5,7 +5,8 @@ import type { Network, PaymentPayload, PaymentRequired, PaymentRequirements } fr
 import { ExactSvmScheme } from "@x402/svm/exact/client";
 import type { SettlementProfile } from "./settlement-profile.js";
 import { computePaidRequestDigest, paidRequestMatches, type PaidRequest } from "./paid-request.js";
-import { associatedTokenAddress, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, validateExactPaymentTransaction } from "./transaction-validator.js";
+import { checkSettledTransaction, type RpcTransaction } from "./settlement-check.js";
+import { TOKEN_PROGRAM, validateExactPaymentTransaction } from "./transaction-validator.js";
 import {
   PaidServiceUnavailableError,
   PaymentNotSubmittedError,
@@ -56,18 +57,6 @@ export type X402ExactPaymentProviderOptions = {
   confirmationWaitMs?: number;
   /** Extra blocks past lastValidBlockHeight before a missing transaction counts as expired. */
   expiryMarginBlocks?: number;
-};
-
-type RpcTransaction = {
-  slot?: number;
-  meta?: { err: unknown } | null;
-  transaction?: {
-    signatures?: string[];
-    message?: {
-      recentBlockhash?: string;
-      instructions?: Array<{ program?: string; programId?: string; parsed?: { type?: string; info?: Record<string, unknown> } }>;
-    };
-  };
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -260,6 +249,7 @@ export class X402ExactPaymentProvider implements PaymentProvider {
         lastValidBlockHeight: lastValidBlockHeight.toString(),
         resourceUrl: request.url,
         requestSha256: request.sha256,
+        transactionBase64: (payload.payload as { transaction: string }).transaction,
         preparedAt: Date.now(),
       };
 
@@ -377,51 +367,26 @@ export class X402ExactPaymentProvider implements PaymentProvider {
       }
     }
 
-    const destination = await associatedTokenAddress(attempt.payTo, attempt.asset, TOKEN_PROGRAM);
-    const destination2022 = await associatedTokenAddress(attempt.payTo, attempt.asset, TOKEN_2022_PROGRAM);
-
     for (const signature of candidates) {
       const tx = await this.#rpc<RpcTransaction | null>("getTransaction", [
         signature,
         { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 },
       ]);
+      const check = await checkSettledTransaction(tx, attempt);
 
-      if (!tx?.transaction?.signatures?.includes(attempt.payerSignature)) {
-        continue;
+      switch (check.status) {
+        case "not_this_payment":
+          continue;
+        case "facts_mismatch":
+          return { status: "inconclusive", detail: check.detail };
+        case "failed_onchain":
+          return { status: "failed_onchain", transactionId: check.transactionId, error: check.error };
+        case "settled":
+          return {
+            status: "confirmed",
+            settlement: { transactionId: check.transactionId, slot: check.slot, facilitatorReportedTransaction: hint, confirmedAt: Date.now() },
+          };
       }
-
-      const transactionId = tx.transaction.signatures[0] ?? signature;
-      const factsMatch =
-        tx.transaction.message?.recentBlockhash === attempt.blockhash &&
-        (tx.transaction.message.instructions ?? []).some((ix) => {
-          const info = ix.parsed?.info;
-          const amount = isRecord(info?.tokenAmount) ? info.tokenAmount.amount : undefined;
-          return (
-            ix.parsed?.type === "transferChecked" &&
-            info?.mint === attempt.asset &&
-            info?.authority === attempt.payer &&
-            (info?.destination === destination || info?.destination === destination2022) &&
-            amount === attempt.amountAtomic
-          );
-        });
-
-      if (!factsMatch) {
-        return { status: "inconclusive", detail: `transaction ${transactionId} carries the payer signature but its facts do not match` };
-      }
-
-      if (tx.meta?.err !== null && tx.meta?.err !== undefined) {
-        return { status: "failed_onchain", transactionId, error: JSON.stringify(tx.meta.err) };
-      }
-
-      return {
-        status: "confirmed",
-        settlement: {
-          transactionId,
-          slot: typeof tx.slot === "number" ? String(tx.slot) : null,
-          facilitatorReportedTransaction: hint,
-          confirmedAt: Date.now(),
-        },
-      };
     }
 
     const height = BigInt(await this.#rpc<number>("getBlockHeight", [{ commitment: "confirmed" }]));
@@ -475,16 +440,20 @@ export class X402ExactPaymentProvider implements PaymentProvider {
 
   #summarizeResult(httpStatus: number, bytes: Uint8Array): PaidResult {
     let json: unknown = null;
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
 
-    if (bytes.byteLength <= this.#maxResultBytes) {
-      try {
-        json = JSON.parse(new TextDecoder().decode(bytes));
-      } catch {
-        json = null;
-      }
+    if (bytes.byteLength > this.#maxResultBytes) {
+      return { httpStatus, json, sha256, bytes: bytes.byteLength };
     }
 
-    return { httpStatus, json, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength };
+    try {
+      json = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      json = null;
+    }
+
+    // The exact bytes are kept (bounded) so evidence can show they hash to `sha256`.
+    return { httpStatus, json, sha256, bytes: bytes.byteLength, bodyBase64: Buffer.from(bytes).toString("base64") };
   }
 }
 

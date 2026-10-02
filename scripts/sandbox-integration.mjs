@@ -11,6 +11,8 @@
 // Exits non-zero on any failed assertion. Sandbox *availability* is checked
 // separately (CI preflight) so an outage is reported as such, not hidden.
 
+import { isExternalPaymentFailure, Outcome } from "./lib/outcome.mjs";
+
 const AGENT_URL = process.env.AGENT_URL ?? "http://agent:4000";
 const AUTHORITY_URL = process.env.AUTHORITY_URL ?? "http://authority:4002";
 const APPROVER_URL = process.env.APPROVER_URL ?? "http://approver:4003";
@@ -23,16 +25,9 @@ if (!APPROVER_CODE) {
 }
 const SECRET = process.env.AUTHORITY_SHARED_SECRET;
 
-let failures = 0;
-
-function check(name, condition, detail) {
-  if (condition) {
-    console.log(`  ok   ${name}`);
-  } else {
-    failures += 1;
-    console.log(`  FAIL ${name}: ${JSON.stringify(detail)}`);
-  }
-}
+// Exit 0 pass / 1 integration regression / 3 external environment failure (see lib/outcome.mjs).
+const outcome = new Outcome();
+const check = (name, condition, detail) => outcome.check(name, condition, detail);
 
 async function demo(body) {
   const response = await fetch(`${AGENT_URL}/demo`, {
@@ -94,8 +89,17 @@ check("agent installs the human-signed permit", installed.status === 200, instal
 
 // Case 1: ALLOW -> real sandbox settlement + paid result.
 const allow = await demo({ invocationId: `${run}-allow` });
-check("ALLOW settles on the sandbox and returns the paid result", allow.http === 200 && allow.decision === "ALLOW" && typeof allow.tx === "string" && allow.result !== null, allow);
-check("the service received exactly the approved operation", allow.received?.operation === "summarize" && allow.received?.datasetId === "dataset-a", allow.received);
+const allowSettled = allow.http === 200 && allow.decision === "ALLOW" && typeof allow.tx === "string" && allow.result !== null;
+const allowExternal = !allowSettled && isExternalPaymentFailure(allow);
+
+if (allowExternal) {
+  // Correct product behavior (blocked, not retried); the environment failed.
+  outcome.external("ALLOW settles on the sandbox and returns the paid result", "payment outcome uncertain or paid service unavailable", allow);
+  outcome.skip("the service received exactly the approved operation", "depends on the ALLOW settlement");
+} else {
+  check("ALLOW settles on the sandbox and returns the paid result", allowSettled, allow);
+  check("the service received exactly the approved operation", allow.received?.operation === "summarize" && allow.received?.datasetId === "dataset-a", allow.received);
+}
 
 // Phase 4.5: same price/payTo/asset, different business operation or argument.
 const exportDeny = await demo({ operation: "export" });
@@ -106,7 +110,13 @@ check("summarize(dataset-b) -> DENY OPERATION_ARGUMENT_NOT_AUTHORIZED, no paymen
 
 // Case 4: replay -> same stored result, no new settlement.
 const replay = await demo({ invocationId: `${run}-allow` });
-check("replay returns the same transaction without paying again", replay.http === 200 && replay.replay === true && replay.tx === allow.tx, replay);
+if (allowExternal) {
+  // Still a product check: an uncertain invocation must stay blocked, never be paid again.
+  check("replay of the uncertain ALLOW stays RECONCILIATION_REQUIRED (no second payment)", replay.http === 409 && replay.refusal === "RECONCILIATION_REQUIRED", replay);
+  outcome.skip("replay returns the same transaction without paying again", "depends on the ALLOW settlement");
+} else {
+  check("replay returns the same transaction without paying again", replay.http === 200 && replay.replay === true && replay.tx === allow.tx, replay);
+}
 
 // Case 5: conflict.
 const conflict = await demo({ invocationId: `${run}-allow`, amountAtomic: "15000" });
@@ -130,19 +140,30 @@ const retry = await demo({ invocationId: `${run}-lost`, scenario: "lost-response
 check("retry while unresolved does not pay again", retry.http === 409 && retry.refusal === "RECONCILIATION_REQUIRED", retry);
 
 let resolved = null;
+let lastReport = null;
 for (let attempt = 0; attempt < 12 && resolved === null; attempt += 1) {
   const reports = await reconcile();
+  lastReport = reports.find((report) => report.invocationId === `${run}-lost`) ?? lastReport;
   resolved = reports.find((report) => report.invocationId === `${run}-lost` && report.outcome === "confirmed") ?? null;
   if (resolved === null) await new Promise((resolve) => setTimeout(resolve, 5_000));
 }
-check("reconciliation confirms the landed sandbox transaction", resolved !== null, resolved);
-
-const afterReconcile = await demo({ invocationId: `${run}-lost` });
-check("replay after reconciliation returns the reconciled transaction", afterReconcile.http === 200 && afterReconcile.tx === resolved?.detail, afterReconcile);
-
-if (failures > 0) {
-  console.log(`\n${failures} integration check(s) FAILED`);
-  process.exit(1);
+// The lost-response payment is submitted by the sandbox facilitator. If it
+// never landed (or is still pending), that is the environment, provided the
+// authority kept it blocked rather than confirming or re-paying it.
+const lostNeverLanded = resolved === null && lastReport !== null && ["failed", "still_pending"].includes(lastReport.outcome);
+if (lostNeverLanded) {
+  outcome.external("reconciliation confirms the landed sandbox transaction", "the facilitator-submitted transaction did not land on the sandbox", lastReport);
+} else {
+  check("reconciliation confirms the landed sandbox transaction", resolved !== null, { resolved, lastReport });
 }
 
-console.log("\nAll sandbox integration checks passed.");
+const afterReconcile = await demo({ invocationId: `${run}-lost` });
+if (lostNeverLanded) {
+  // Product check that still applies: an unresolved/failed uncertain payment is never paid again.
+  check("the unlanded lost-response invocation is not paid again", afterReconcile.tx === null, afterReconcile);
+  outcome.skip("replay after reconciliation returns the reconciled transaction", "depends on the lost-response transaction landing");
+} else {
+  check("replay after reconciliation returns the reconciled transaction", afterReconcile.http === 200 && afterReconcile.tx === resolved?.detail, afterReconcile);
+}
+
+outcome.finish("Sandbox integration");

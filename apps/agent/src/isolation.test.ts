@@ -63,3 +63,21 @@ test("compose: only the approver mounts the issuer key volume; the agent has no 
   // The authority sees only the public trust file, read-only.
   assert.match(composeService("authority"), /issuer_trust:\/trust:ro/);
 });
+
+test("compose: the authority receipt key volume is authority-only; verifiers get public keys read-only and the offline verifier has no network", () => {
+  for (const service of ["agent", "web", "service-agent", "approver", "demo-driver"]) {
+    assert.doesNotMatch(composeService(service), /authority_data|authority_trust/, `${service} must not mount authority key/trust volumes`);
+  }
+
+  const authority = composeService("authority");
+  assert.match(authority, /authority_data:\/data/);
+  assert.match(authority, /AUTHORITY_RECEIPT_KEY_FILE: "\/data\//);
+
+  const compose = readFileSync(join(repoRoot, "compose.yaml"), "utf8");
+  const verifierTemplate = compose.slice(compose.indexOf("x-verifier:"), compose.indexOf("x-dev-volumes:"));
+  assert.match(verifierTemplate, /authority_trust:\/trust\/authority:ro/);
+  assert.match(verifierTemplate, /issuer_trust:\/trust\/issuer:ro/);
+  assert.match(verifierTemplate, /- \.:\/workspace:ro/);
+  assert.doesNotMatch(verifierTemplate, /authority_data|approver_keys/);
+  assert.match(composeService("verifier"), /network_mode: none/);
+});

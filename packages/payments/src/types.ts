@@ -81,6 +81,12 @@ export type PaymentAttempt = {
   resourceUrl: string;
   /** Digest of the exact HTTP request (method, URL, body) this payment pays for. */
   requestSha256: string;
+  /**
+   * The exact signed wire transaction (base64) as transmitted, so evidence
+   * can show offline that the payer signed exactly this transfer. Absent on
+   * attempts recorded before Phase 5.
+   */
+  transactionBase64?: string;
   preparedAt: number;
 };
 
@@ -96,8 +102,11 @@ export type PaidResult = {
   httpStatus: number;
   /** Parsed JSON body when it is JSON and within the size limit, else null. */
   json: unknown;
+  /** SHA-256 (hex) of the exact response body bytes. */
   sha256: string;
   bytes: number;
+  /** The exact response body (base64) when within the size limit; lets evidence re-hash it. */
+  bodyBase64?: string;
 };
 
 export type PaymentExecution = {

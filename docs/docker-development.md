@@ -135,6 +135,17 @@ The next `up --build` recreates them from the development image.
 
 **Warning:** `down -v` also deletes the `authority_data` volume, which holds the authority's durable SQLite state (`/data/authority.db`: grant budgets, invocation ids/states and receipts). Plain `docker compose down` and container restarts keep it. The database lives only on that volume; `*.db` files are gitignored and never belong in the source tree.
 
+Evidence verification uses two tools-profile services. Bundles are exported to the gitignored `.evidence/` directory:
+
+- `verifier` runs with `network_mode: none`, read-only repository and dependencies, and read-only public trust files at `/trust/issuer/trusted-issuer` and `/trust/authority/authority.pub`.
+- `verifier-online` is the same, plus network access for `--online` sandbox settlement checks.
+
+```bash
+./scripts/evidence-demo.sh
+```
+
+The authority's receipt-signing seed lives in `authority_data` (authority only). Its public key is published to `authority_trust`, which the verifiers mount read-only.
+
 `down -v` likewise deletes `approver_keys` and `issuer_trust`. On the next start the approver creates a **new** issuer key and approval code, and the authority trusts only the new issuer.
 
 ## Run checks inside Docker

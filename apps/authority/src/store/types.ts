@@ -1,4 +1,4 @@
-import type { AuthorizationRequestV1, AuthorizationRequestV2 } from "@virtual-haibin/mandate";
+import type { AgentRequestSignature, AuthorizationRequestV1, AuthorizationRequestV2, SignedPurchasePermitV2 } from "@virtual-haibin/mandate";
 import type { ConfirmedSettlement, PaidResult, PaymentAttempt, PaymentRequirement } from "@virtual-haibin/payments";
 import type { SignedAuthorizationReceipt } from "../receipt.js";
 
@@ -81,6 +81,15 @@ export interface AuthorityStore {
  */
 export type StoredAuthorizationRequest = AuthorizationRequestV1 | AuthorizationRequestV2;
 
+/**
+ * The signed artifacts behind an invocation, kept verbatim for portable
+ * evidence: the human's signed permit and the agent's request signature.
+ */
+export type StoredAuthorizationEvidence = {
+  permit: SignedPurchasePermitV2;
+  agentSignature: AgentRequestSignature;
+};
+
 export type InvocationState = "RESERVED" | "DENIED" | "CONFIRMED" | "FAILED" | "RECONCILIATION_REQUIRED";
 
 export type GrantTerms = {
@@ -102,6 +111,8 @@ export type ReserveInput = {
   decidedAt: number;
   /** The validated payment requirement from the service's 402 challenge, if one was obtained. */
   paymentRequirement: PaymentRequirement | null;
+  /** Signed permit + agent signature, kept for evidence export (Phase 5+). */
+  authorization?: StoredAuthorizationEvidence;
 };
 
 export type ConfirmPayment = {
@@ -147,6 +158,8 @@ export type InvocationRecord = {
   settlement: ConfirmedSettlement | null;
   result: PaidResult | null;
   receipt: SignedAuthorizationReceipt | null;
+  /** NULL for invocations recorded before evidence capture (schema < v3). */
+  authorization: StoredAuthorizationEvidence | null;
   stateReason: string | null;
   decidedAt: number;
   createdAt: number;

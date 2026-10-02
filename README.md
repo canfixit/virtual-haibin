@@ -178,16 +178,37 @@ Current limitations and remaining boundaries:
 - **sandbox only** -- the only settlement profile is `solana-payment-sandbox`. Its challenges advertise mainnet's CAIP-2 id and the mainnet USDC mint address (the sandbox clones mainnet), so the challenge alone cannot prove the settlement environment; the guarantee comes from the authority-pinned sandbox RPC and authority-fetched sandbox blockhash (see the doc above). No public devnet or mainnet path exists.
 - **sandbox USDC** is the mainnet USDC mint address as cloned into the sandbox; it has no real value and wallets are funded with Surfnet cheatcodes
 - durable state is single-node SQLite (`/data/authority.db` on the `authority_data` volume) behind an `AuthorityStore` interface; no replication/backup, and startup recovery assumes a single authority process
-- the authority's receipt-signing key and payment wallet are ephemeral per process; stored receipts stay verifiable against the address they name, and reconciliation needs only the stored payer signature, not the key
+- the authority's receipt/evidence signing key is persistent (authority-only volume) and pinned by verifiers; the payment wallet is still ephemeral per process (reconciliation needs only the stored payer signature, not the key), so the payer's identity in evidence is authority-attested
 - the paid service only receives payment through Pay Kit's own x402 verification; it does not yet verify Virtual Haibin's authorization evidence (Phase 5)
-- the authority signs a decision receipt, but there is no standalone evidence bundle or independent verifier yet (Phase 6)
+- portable evidence: `GET /evidence/<invocationId>` exports an authority-signed EvidenceBundleV1 that a standalone verifier checks with the authority stopped. Offline it verifies signatures, digests and static policy; with `--online` it also observes settlement on the sandbox RPC. It reports what is only authority-attested (budget totals, offline settlement, result observation) and what no bundle can prove; the service does not sign results yet (Phase 5C). See [docs/evidence-and-verification.md](docs/evidence-and-verification.md)
 - agent identity is ephemeral: the agent generates a fresh non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds); after an agent restart the human must approve a new permit for the new identity
 - the human approval boundary is demo-grade: the issuer key is a seed file in the approver's private Docker volume, and approval is gated by a 128-bit approval code the human reads from that volume -- not a wallet, HSM or IAM system. The approver's own network and loopback-only port are defense in depth only; on Docker Desktop other containers can reach the port via `host.docker.internal`, which is why the approval code is required
 - one exact operation schema (`summarize`/`export` by `datasetId`) with exact-match comparison; no policy language
 - agent-to-authority transport authentication is a dev-only shared bearer secret (`AUTHORITY_SHARED_SECRET` in the gitignored `.env`); it is never treated as proof of agent identity -- the agent's request signature is
 - an invocation whose payment outcome is unknown is durably `RECONCILIATION_REQUIRED` (HTTP 409) with its budget reserved; reconciliation resolves it read-only against the sandbox (landed -> `CONFIRMED`; not landed and blockhash expired -> `FAILED`, reservation released). An invocation interrupted before its payment attempt was recorded was provably never transmitted (the attempt is durably committed before the credential can leave the authority), so startup recovery releases it as `FAILED`.
 
-CI (`.github/workflows/ci.yml`) has two jobs: a deterministic job (frozen install, all unit/security/persistence/payment-protocol tests with local fakes, typecheck/build inside the project image; no external network needed by tests) and a clearly labelled external integration job that starts the stack against the Pay.sh sandbox and runs `scripts/sandbox-integration.mjs` and `scripts/semantic-demo.mjs` from the `demo-driver` tools container, with a separate sandbox-availability preflight.
+**CI.** `.github/workflows/ci.yml` is the required correctness gate. It runs a frozen install, every unit/security/persistence/payment-protocol/evidence test using local fakes, and typecheck/build inside the project image, with no external network.
+
+The live Pay.sh sandbox integration lives in a **separate** workflow, `.github/workflows/sandbox-integration.yml`. It runs manually or on a daily schedule and is never a merge gate, because it depends on third-party availability. It runs `scripts/sandbox-integration.mjs`, `scripts/semantic-demo.mjs` and `scripts/evidence-demo.sh` after a sandbox-availability preflight. Each step's failure is classified, never hidden:
+
+- **Integration regression** (exit 1): a product assertion failed.
+- **External sandbox/environment failure** (exit 3): the sandbox, its RPC or the paid service's facilitator failed, or an externally submitted payment ended `RECONCILIATION_REQUIRED`. The authority correctly keeps it blocked, and neither the product nor the tests retry it.
+
+Checks that depend on such a payment are reported as skipped, and the run still fails.
+
+To rerun the external integration:
+
+- **On GitHub:** Actions → "Sandbox integration (external)" → Run workflow.
+- **Locally** (stack up):
+
+  ```bash
+  code="$(docker compose exec -T approver cat /keys/approval-code)"
+  docker compose run --rm -T -e APPROVER_CODE="$code" demo-driver node scripts/sandbox-integration.mjs
+  docker compose run --rm -T -e APPROVER_CODE="$code" demo-driver node scripts/semantic-demo.mjs
+  ./scripts/evidence-demo.sh
+  ```
+
+A repeated external classification across reruns while the sandbox itself looks healthy deserves investigation as a possible regression.
 
 ## Core architecture
 
@@ -196,6 +217,7 @@ apps/
   web/             # User-facing dashboard
   agent/           # Autonomous agent runtime (no signing key, no issuer key)
   approver/        # Human-approval boundary (only holder of the permit-issuer key)
+  verifier/        # Standalone evidence verifier CLI (no authority, no network offline)
   authority/        # Protected signer/enforcement boundary
   service-agent/   # Demo / integration service
 
@@ -205,6 +227,7 @@ packages/
   policy/          # Deterministic authorization decisions
   payments/        # Solana/payment abstractions
   audit/           # Action/evidence event models
+  evidence/        # EvidenceBundleV1, signed manifest, strict parser, verifier library
 ```
 
 ## Engineering priorities
@@ -304,7 +327,7 @@ To remove dependency volumes as well:
 docker compose down -v
 ```
 
-`down -v` also deletes the `authority_data` volume, i.e. **all durable authority state** (budgets, invocation history, receipts), and the `approver_keys` / `issuer_trust` volumes (the issuer key and approval code; a new issuer is created on next start). Use plain `docker compose down` to keep them.
+`down -v` also deletes the `authority_data` volume, i.e. **all durable authority state** (budgets, invocation history, receipts), the `approver_keys` / `issuer_trust` volumes (the issuer key and approval code; a new issuer is created on next start), and the `authority_trust` volume (the authority's receipt key itself lives in `authority_data`, so a new authority key is created too; keep the old public key if you still need to verify old bundles). Use plain `docker compose down` to keep them.
 
 ### Validate inside Docker
 
@@ -350,6 +373,7 @@ Those areas are deliberately outside the current hackathon critical path.
 - [Docker-first development](docs/docker-development.md)
 - [x402 settlement on the Pay.sh Solana Payment Sandbox](docs/payments-x402-sandbox.md)
 - [Human approval boundary and semantic operation authorization](docs/human-approval-and-semantic-authorization.md)
+- [Portable evidence and the standalone verifier](docs/evidence-and-verification.md)
 
 ## Security
 

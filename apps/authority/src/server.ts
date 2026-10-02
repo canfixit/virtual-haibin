@@ -1,9 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import canonicalize from "canonicalize";
 import { validateAuthorizationRequestV2 } from "@virtual-haibin/mandate";
 import { AuthorityRequestError, type AuthorityService } from "./authorize.js";
 
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_EVIDENCE_BYTES = 512 * 1024;
+const EVIDENCE_PATH = /^\/evidence\/([A-Za-z0-9_.:-]{1,128})$/;
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
   response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
@@ -139,6 +142,33 @@ export function createAuthorityServer(options: AuthorityServerOptions): Server {
           payment: result.payment,
           result: result.result,
         });
+        return;
+      }
+
+      // Portable evidence for ONE decided invocation (bearer-protected). The
+      // invocation id is validated; there is no other query surface.
+      const evidenceMatch = request.method === "GET" ? EVIDENCE_PATH.exec(request.url ?? "") : null;
+
+      if (request.method === "GET" && request.url?.startsWith("/evidence/")) {
+        if (!isAuthorized(request)) {
+          sendJson(response, 401, { error: "Unauthorized" });
+          return;
+        }
+
+        if (evidenceMatch === null || evidenceMatch[1] === undefined) {
+          throw new HttpInputError("invocationId must be 1-128 characters of [A-Za-z0-9_.:-].", 400);
+        }
+
+        const bundle = await authorityService.exportEvidence(evidenceMatch[1]);
+        // Deterministic (RFC 8785) serialization; bounded.
+        const body = canonicalize(bundle);
+
+        if (body === undefined || Buffer.byteLength(body) > MAX_EVIDENCE_BYTES) {
+          throw new Error("Evidence bundle could not be serialized within the size limit.");
+        }
+
+        response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+        response.end(body);
         return;
       }
 

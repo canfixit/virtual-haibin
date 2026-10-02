@@ -12,12 +12,14 @@ COPY apps/web/package.json apps/web/package.json
 COPY apps/agent/package.json apps/agent/package.json
 COPY apps/authority/package.json apps/authority/package.json
 COPY apps/approver/package.json apps/approver/package.json
+COPY apps/verifier/package.json apps/verifier/package.json
 COPY apps/service-agent/package.json apps/service-agent/package.json
 COPY packages/identity/package.json packages/identity/package.json
 COPY packages/mandate/package.json packages/mandate/package.json
 COPY packages/policy/package.json packages/policy/package.json
 COPY packages/payments/package.json packages/payments/package.json
 COPY packages/audit/package.json packages/audit/package.json
+COPY packages/evidence/package.json packages/evidence/package.json
 
 RUN pnpm install --frozen-lockfile
 

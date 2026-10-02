@@ -43,7 +43,7 @@ Sandbox transactions are sandbox transactions. They are never described as mainn
 |---|---|---|---|
 | Permit issuer (human) | `apps/approver` only (seed in the approver-only `approver_keys` volume; see [human-approval-and-semantic-authorization.md](human-approval-and-semantic-authorization.md)) | PurchasePermit v2 | payments |
 | Agent identity | agent (ephemeral, non-extractable) | AuthorizationRequest | payments |
-| Authority receipt key | authority (ephemeral) | Virtual Haibin decision receipts | payments |
+| Authority receipt key | authority only (persistent seed in the `authority_data` volume, mode 0600; public key published to `authority_trust` for verifiers) | decision receipts and evidence manifests | payments |
 | **Payment wallet** | **authority's payment provider only** (ephemeral, non-extractable, sandbox-funded) | the x402 `exact` transfer | leaves the provider, is logged, or is returned |
 
 The agent, web app and paid service never receive the payment wallet key. There is no endpoint that signs caller-supplied transaction bytes.

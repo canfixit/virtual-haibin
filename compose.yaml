@@ -24,6 +24,22 @@ x-demo-payment-config: &demo-payment-config
 # it; the agent and web never see or choose an RPC.
 x-sandbox-rpc: &sandbox-rpc "https://402.surfnet.dev:8899"
 
+x-verifier: &verifier
+  image: virtual-haibin-dev:local
+  working_dir: /workspace
+  profiles: ["tools"]
+  entrypoint: ["node", "--import", "tsx", "apps/verifier/src/main.ts"]
+  volumes:
+    - .:/workspace:ro
+    - root_node_modules:/workspace/node_modules:ro
+    - verifier_node_modules:/workspace/apps/verifier/node_modules:ro
+    - evidence_node_modules:/workspace/packages/evidence/node_modules:ro
+    - mandate_node_modules:/workspace/packages/mandate/node_modules:ro
+    - payments_node_modules:/workspace/packages/payments/node_modules:ro
+    - policy_node_modules:/workspace/packages/policy/node_modules:ro
+    - issuer_trust:/trust/issuer:ro
+    - authority_trust:/trust/authority:ro
+
 x-dev-volumes: &dev-volumes
   - .:/workspace
   - root_node_modules:/workspace/node_modules
@@ -37,6 +53,8 @@ x-dev-volumes: &dev-volumes
   - payments_node_modules:/workspace/packages/payments/node_modules
   - audit_node_modules:/workspace/packages/audit/node_modules
   - approver_node_modules:/workspace/apps/approver/node_modules
+  - verifier_node_modules:/workspace/apps/verifier/node_modules
+  - evidence_node_modules:/workspace/packages/evidence/node_modules
 
 services:
   # Human-approval boundary: the ONLY holder of the PurchasePermit issuer
@@ -65,6 +83,7 @@ services:
       - root_node_modules:/workspace/node_modules
       - approver_node_modules:/workspace/apps/approver/node_modules
       - mandate_node_modules:/workspace/packages/mandate/node_modules
+      - identity_node_modules:/workspace/packages/identity/node_modules
       - approver_keys:/keys
       - issuer_trust:/trust
     healthcheck:
@@ -122,6 +141,11 @@ services:
       # Issuer trust root: the one issuer public key allowed to authorize
       # spending (published by the approver; mounted read-only below).
       AUTHORITY_TRUSTED_ISSUER_FILE: "/trust/trusted-issuer"
+      # Persistent receipt/evidence signing key: authority-only data volume,
+      # mode 0600, never logged or served. Only its PUBLIC key is published
+      # to authority_trust for verifiers to pin.
+      AUTHORITY_RECEIPT_KEY_FILE: "/data/authority-receipt-ed25519.seed"
+      AUTHORITY_TRUST_PUBLISH_FILE: "/authority-trust/authority.pub"
       # Dev-only shared bearer token authenticating agent -> authority HTTP
       # calls. Supplied at runtime from the gitignored .env file (see
       # .env.example); never commit a value here.
@@ -143,8 +167,10 @@ services:
       - payments_node_modules:/workspace/packages/payments/node_modules
       - audit_node_modules:/workspace/packages/audit/node_modules
       - approver_node_modules:/workspace/apps/approver/node_modules
+      - evidence_node_modules:/workspace/packages/evidence/node_modules
       - authority_data:/data
       - issuer_trust:/trust:ro
+      - authority_trust:/authority-trust
     depends_on:
       approver:
         condition: service_healthy
@@ -217,6 +243,21 @@ services:
     volumes:
       - .:/workspace
 
+  # Standalone evidence verifier (tools profile). NO network at all, the
+  # repository and dependencies read-only, and trust roots mounted read-only
+  # from the published PUBLIC keys. It never talks to the authority.
+  #   docker compose run --rm verifier verify .evidence/<id>.json \
+  #     --issuer-trust /trust/issuer/trusted-issuer --authority-trust /trust/authority/authority.pub
+  verifier:
+    <<: *verifier
+    network_mode: none
+
+  # Same verifier with network access, for --online settlement observation
+  # on the sandbox RPC named on its own command line (default: the Pay.sh
+  # sandbox). Still never contacts the authority.
+  verifier-online:
+    <<: *verifier
+
   web:
     <<: *app-image
     command: ["pnpm", "dev:web"]
@@ -242,10 +283,14 @@ volumes:
   payments_node_modules:
   audit_node_modules:
   approver_node_modules:
+  verifier_node_modules:
+  evidence_node_modules:
   authority_data:
   # Issuer private key (approver only) and the published issuer public key.
   approver_keys:
   issuer_trust:
+  # The authority's published PUBLIC receipt key (authority writes; verifiers read-only).
+  authority_trust:
 
 networks:
   default:

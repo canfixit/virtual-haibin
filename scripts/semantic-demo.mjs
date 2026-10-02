@@ -11,6 +11,8 @@
 // Prints one structured JSON object per step (for the judge demo) and exits
 // non-zero if any expectation fails.
 
+import { EXIT_EXTERNAL, EXIT_REGRESSION, isExternalPaymentFailure } from "./lib/outcome.mjs";
+
 const AGENT_URL = process.env.AGENT_URL ?? "http://agent:4000";
 const APPROVER_URL = process.env.APPROVER_URL ?? "http://approver:4003";
 // The human's approval code (from the approver's private volume), supplied by the operator.
@@ -22,7 +24,9 @@ if (!APPROVER_CODE) {
 }
 const SERVICE_URL = process.env.SERVICE_URL ?? "http://service-agent:4001";
 
+// Exit 0 pass / 1 regression / 3 external environment failure (see lib/outcome.mjs).
 let failures = 0;
+let externals = 0;
 const transcript = [];
 
 function expect(step, name, condition) {
@@ -142,9 +146,16 @@ record({
 
 // 2. ALLOW: the approved operation is paid on the sandbox.
 const allow = await agentRequest("ALLOW", `${run}-summarize-a`, "summarize", "dataset-a");
-expect("ALLOW", "decision ALLOW", allow.decision === "ALLOW");
-expect("ALLOW", "sandbox settlement", typeof allow.payment.transactionId === "string");
-expect("ALLOW", "service received exactly summarize(dataset-a)", allow.serviceReceived?.operation === "summarize" && allow.serviceReceived?.datasetId === "dataset-a");
+const allowExternal = allow.decision !== "ALLOW" && isExternalPaymentFailure({ http: allow.httpStatus, refusal: allow.reasonCodes[0] ?? null });
+if (allowExternal) {
+  // Blocked and not retried (correct); the sandbox/facilitator failed.
+  externals += 1;
+  console.error(`EXT  [ALLOW] EXTERNAL ENVIRONMENT FAILURE: payment outcome uncertain or paid service unavailable (${allow.agentStatus})`);
+} else {
+  expect("ALLOW", "decision ALLOW", allow.decision === "ALLOW");
+  expect("ALLOW", "sandbox settlement", typeof allow.payment.transactionId === "string");
+  expect("ALLOW", "service received exactly summarize(dataset-a)", allow.serviceReceived?.operation === "summarize" && allow.serviceReceived?.datasetId === "dataset-a");
+}
 
 // 3. SEMANTIC DENY: fresh invocation, same terms, unapproved operation.
 const exportDeny = await agentRequest("SEMANTIC_DENY", `${run}-export-a`, "export", "dataset-a");
@@ -165,8 +176,13 @@ for (const entry of [exportDeny, argumentDeny]) {
 
 // 5. REPLAY: the allowed invocation again -> original result, no second payment.
 const replay = await agentRequest("REPLAY", `${run}-summarize-a`, "summarize", "dataset-a");
-expect("REPLAY", "replay flag", replay.replay === true);
-expect("REPLAY", "same transaction", replay.payment.transactionId === allow.payment.transactionId);
+if (allowExternal) {
+  expect("REPLAY", "uncertain invocation stays blocked, no second payment", replay.httpStatus === 409 && replay.payment.transactionId === null);
+  console.error("SKIP [REPLAY] same-transaction check depends on the ALLOW settlement");
+} else {
+  expect("REPLAY", "replay flag", replay.replay === true);
+  expect("REPLAY", "same transaction", replay.payment.transactionId === allow.payment.transactionId);
+}
 
 record({
   step: "SUMMARY",
@@ -182,6 +198,7 @@ record({
       replay: entry.replay,
     })),
   failures,
+  externalFailures: externals,
 });
 
-process.exit(failures === 0 ? 0 : 1);
+process.exit(failures > 0 ? EXIT_REGRESSION : externals > 0 ? EXIT_EXTERNAL : 0);

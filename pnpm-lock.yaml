@@ -203,6 +203,9 @@ importers:
       '@solana/keys':
         specifier: ^8.3.0
         version: 8.4.0(typescript@6.0.3)
+      '@virtual-haibin/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@virtual-haibin/mandate':
         specifier: workspace:*
         version: link:../../packages/mandate
@@ -225,6 +228,12 @@ importers:
       '@virtual-haibin/audit':
         specifier: workspace:*
         version: link:../../packages/audit
+      '@virtual-haibin/evidence':
+        specifier: workspace:*
+        version: link:../../packages/evidence
+      '@virtual-haibin/identity':
+        specifier: workspace:*
+        version: link:../../packages/identity
       '@virtual-haibin/mandate':
         specifier: workspace:*
         version: link:../../packages/mandate
@@ -261,6 +270,22 @@ importers:
         specifier: 24.13.6
         version: 24.13.6
 
+  apps/verifier:
+    dependencies:
+      '@solana/addresses':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+      '@virtual-haibin/evidence':
+        specifier: workspace:*
+        version: link:../../packages/evidence
+      '@virtual-haibin/payments':
+        specifier: workspace:*
+        version: link:../../packages/payments
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.6
+        version: 24.13.6
+
   apps/web:
     dependencies:
       react:
@@ -282,7 +307,46 @@ importers:
 
   packages/audit: {}
 
-  packages/identity: {}
+  packages/evidence:
+    dependencies:
+      '@solana/addresses':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+      '@solana/codecs-strings':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+      '@solana/keys':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+      '@virtual-haibin/mandate':
+        specifier: workspace:*
+        version: link:../mandate
+      '@virtual-haibin/payments':
+        specifier: workspace:*
+        version: link:../payments
+      '@virtual-haibin/policy':
+        specifier: workspace:*
+        version: link:../policy
+      canonicalize:
+        specifier: ^5.1.0
+        version: 5.1.0
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.6
+        version: 24.13.6
+
+  packages/identity:
+    dependencies:
+      '@solana/addresses':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+      '@solana/keys':
+        specifier: ^8.3.0
+        version: 8.4.0(typescript@6.0.3)
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.6
+        version: 24.13.6
 
   packages/mandate:
     dependencies:

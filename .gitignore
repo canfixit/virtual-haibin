@@ -169,3 +169,6 @@ ledger/
 *.db-shm
 *.sqlite
 *.sqlite3
+
+# Exported evidence bundles from local demo runs (public data, but generated)
+.evidence/

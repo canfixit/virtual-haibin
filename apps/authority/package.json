@@ -14,6 +14,8 @@
     "@solana/codecs-strings": "^8.3.0",
     "@solana/keys": "^8.3.0",
     "@virtual-haibin/audit": "workspace:*",
+    "@virtual-haibin/evidence": "workspace:*",
+    "@virtual-haibin/identity": "workspace:*",
     "@virtual-haibin/mandate": "workspace:*",
     "@virtual-haibin/payments": "workspace:*",
     "@virtual-haibin/policy": "workspace:*",

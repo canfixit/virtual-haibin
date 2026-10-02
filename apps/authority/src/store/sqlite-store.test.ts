@@ -492,7 +492,7 @@ function attemptFor(invocationId: string, amountAtomic = "20000") {
 
 const settlementFor = (transactionId: string) => ({ transactionId, slot: "7", facilitatorReportedTransaction: null, confirmedAt: 2 });
 
-test("a v1 database migrates to v2 atomically and keeps all existing state", async () => {
+test("a v1 database migrates to the current schema atomically and keeps all existing state", async () => {
   const path = tempDbPath();
   const current = new SqliteAuthorityStore(path);
   await current.reserve(reserveInput("inv-old", "20000"), allowAll);
@@ -501,7 +501,7 @@ test("a v1 database migrates to v2 atomically and keeps all existing state", asy
 
   // Rewind to the Phase 3 (v1) schema.
   const raw = new DatabaseSync(path);
-  for (const column of ["payment_requirement_json", "payment_attempt_json", "settlement_json", "result_json"]) {
+  for (const column of ["payment_requirement_json", "payment_attempt_json", "settlement_json", "result_json", "authorization_json"]) {
     raw.exec(`ALTER TABLE invocations DROP COLUMN ${column}`);
   }
   raw.exec("PRAGMA user_version = 1");
@@ -512,6 +512,7 @@ test("a v1 database migrates to v2 atomically and keeps all existing state", asy
   assert.equal(invocation?.state, "CONFIRMED");
   assert.equal(invocation?.paymentTransactionId, "tx-old");
   assert.equal(invocation?.paymentAttempt, null);
+  assert.equal(invocation?.authorization, null);
   assert.deepEqual(await grantAmounts(migrated), { reserved: "0", consumed: "20000" });
   await migrated.close();
 
@@ -519,6 +520,29 @@ test("a v1 database migrates to v2 atomically and keeps all existing state", asy
   const { user_version: version } = check.prepare("PRAGMA user_version").get() as { user_version: number };
   check.close();
   assert.equal(version, SQLITE_SCHEMA_VERSION);
+});
+
+test("a v2 database migrates to v3; legacy rows have no authorization evidence, new rows keep it", async () => {
+  const path = tempDbPath();
+  const current = new SqliteAuthorityStore(path);
+  await current.reserve(reserveInput("inv-v2", "10000"), allowAll);
+  await current.close();
+
+  const raw = new DatabaseSync(path);
+  raw.exec("ALTER TABLE invocations DROP COLUMN authorization_json");
+  raw.exec("PRAGMA user_version = 2");
+  raw.close();
+
+  const migrated = new SqliteAuthorityStore(path);
+  assert.equal((await migrated.getInvocation("inv-v2"))?.authorization, null);
+
+  const authorization = {
+    permit: { grantId: "grant-1" } as never,
+    agentSignature: { algorithm: "ed25519" as const, signature: "sig" },
+  };
+  await migrated.reserve(reserveInput("inv-v3", "10000", { authorization }), allowAll);
+  assert.deepEqual((await migrated.getInvocation("inv-v3"))?.authorization, authorization);
+  await migrated.close();
 });
 
 test("a payment attempt is recorded once, only while RESERVED", async () => {

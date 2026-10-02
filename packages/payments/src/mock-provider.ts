@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   PaidServiceUnavailableError,
   PaymentNotSubmittedError,
@@ -10,7 +11,10 @@ import {
   type PaymentRequirement,
   type SettlementLookup,
 } from "./types.js";
+import { generateKeyPairSigner, type KeyPairSigner } from "@solana/kit";
+import { buildExactPaymentTransactionForTests } from "./exact-transaction.js";
 import { paidRequestMatches, type PaidRequest } from "./paid-request.js";
+import { validateExactPaymentTransaction } from "./transaction-validator.js";
 
 /**
  * In-memory PaymentProvider for tests and local development without a
@@ -43,7 +47,17 @@ export type MockPaymentProviderOptions = {
   /** Terms the "service" quotes for a request/reference; may return a rejection or throw. */
   challenge: (request: PaidRequest, reference: string) => MockChallengeTerms | ChallengeResult | "unavailable";
   behavior?: MockExecuteBehavior;
+  /**
+   * Optional real payment-wallet key. When set, each execution builds and
+   * signs a genuine exact-payment transaction (recorded in the attempt), so
+   * evidence tests can check it offline. Requires real addresses in the
+   * challenge terms (feePayer, asset, payTo).
+   */
+  payer?: KeyPairSigner;
 };
+
+/** A valid base58 32-byte "sandbox" blockhash for mock transactions. */
+export const MOCK_BLOCKHASH = "SURFNETxSAFEHASHxxxxxxxxxxxxxxxxxxx1ace1111";
 
 export class MockPaymentProvider implements PaymentProvider {
   readonly settlementProfile: string;
@@ -60,11 +74,13 @@ export class MockPaymentProvider implements PaymentProvider {
   /** Force lookupSettlement's answer for attempts not in the ledger. */
   lookupWhenMissing: SettlementLookup = { status: "pending", currentBlockHeight: "0" };
   readonly #challenge: MockPaymentProviderOptions["challenge"];
+  readonly #payer: KeyPairSigner | undefined;
   #counter = 0;
 
   constructor(options: MockPaymentProviderOptions) {
     this.settlementProfile = options.settlementProfile ?? "solana-payment-sandbox";
-    this.payerAddress = options.payerAddress ?? "MockPayer1111111111111111111111111111111111";
+    this.#payer = options.payer;
+    this.payerAddress = options.payer?.address ?? options.payerAddress ?? "MockPayer1111111111111111111111111111111111";
     this.behavior = options.behavior ?? "settle";
     this.#challenge = options.challenge;
   }
@@ -112,21 +128,54 @@ export class MockPaymentProvider implements PaymentProvider {
       throw new PaymentNotSubmittedError("mock: paid request does not match the challenged request");
     }
 
+    let payerSignature = `mock-payer-sig-${n}`;
+    let blockhash = `mock-blockhash-${n}`;
+    let transactionBase64: string | undefined;
+
+    if (this.#payer !== undefined) {
+      const { requirement } = input;
+      blockhash = MOCK_BLOCKHASH;
+      transactionBase64 = await buildExactPaymentTransactionForTests({
+        payer: this.#payer,
+        feePayer: requirement.feePayer ?? "",
+        asset: requirement.asset,
+        payTo: requirement.payTo,
+        amountAtomic: requirement.amountAtomic,
+        blockhash,
+        memo: `${input.reference}-${n}`,
+      });
+      const check = await validateExactPaymentTransaction(transactionBase64, {
+        payer: this.#payer.address,
+        feePayer: requirement.feePayer ?? "",
+        asset: requirement.asset,
+        payTo: requirement.payTo,
+        amountAtomic: requirement.amountAtomic,
+        blockhash,
+      });
+
+      if (!check.valid) {
+        throw new PaymentNotSubmittedError(`mock: built an invalid transaction: ${check.reason}`);
+      }
+
+      payerSignature = check.payerSignature;
+    }
+
     const attempt: PaymentAttempt = {
       protocol: "x402",
       scheme: input.requirement.scheme,
       settlementProfile: this.settlementProfile,
       network: input.requirement.network,
       payer: this.payerAddress,
-      payerSignature: `mock-payer-sig-${n}`,
+      payerSignature,
       feePayer: input.requirement.feePayer ?? "",
       asset: input.requirement.asset,
       payTo: input.requirement.payTo,
       amountAtomic: input.requirement.amountAtomic,
-      blockhash: `mock-blockhash-${n}`,
+      blockhash,
       lastValidBlockHeight: "1000",
       resourceUrl: input.request.url,
       requestSha256: input.request.sha256,
+      ...(transactionBase64 === undefined ? {} : { transactionBase64 }),
       preparedAt: Date.now(),
     };
 
@@ -146,13 +195,23 @@ export class MockPaymentProvider implements PaymentProvider {
       throw new PaymentOutcomeUnknownError("mock: timeout after transmission", attempt);
     }
 
-    const transactionId = `mock-tx-${n}`;
+    // With a real payer key the payer's (base58) signature doubles as the
+    // transaction id, so evidence built from it is well-formed.
+    const transactionId = this.#payer === undefined ? `mock-tx-${n}` : payerSignature;
     this.ledger.set(attempt.payerSignature, { transactionId, attempt });
+
+    const body = Buffer.from(JSON.stringify({ result: `mock paid result ${n}`, request: JSON.parse(input.request.body) as unknown }));
 
     return {
       attempt,
       settlement: { transactionId, slot: String(n), facilitatorReportedTransaction: transactionId, confirmedAt: Date.now() },
-      result: { httpStatus: 200, json: { result: `mock paid result ${n}` }, sha256: "0".repeat(64), bytes: 0 },
+      result: {
+        httpStatus: 200,
+        json: JSON.parse(body.toString("utf8")) as unknown,
+        sha256: createHash("sha256").update(body).digest("hex"),
+        bytes: body.byteLength,
+        bodyBase64: body.toString("base64"),
+      },
     };
   }
 
@@ -173,4 +232,9 @@ export class MockPaymentProvider implements PaymentProvider {
 
     return this.lookupWhenMissing;
   }
+}
+
+/** TEST ONLY: a fresh in-memory payment wallet key for MockPaymentProvider's `payer` option. */
+export function generateMockPaymentWallet(): Promise<KeyPairSigner> {
+  return generateKeyPairSigner();
 }

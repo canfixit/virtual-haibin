@@ -1,19 +1,21 @@
 {
-  "name": "@virtual-haibin/approver",
+  "name": "@virtual-haibin/evidence",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": "./src/index.ts",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@solana/addresses": "^8.3.0",
+    "@solana/codecs-strings": "^8.3.0",
     "@solana/keys": "^8.3.0",
-    "@virtual-haibin/identity": "workspace:*",
-    "@virtual-haibin/mandate": "workspace:*"
+    "@virtual-haibin/mandate": "workspace:*",
+    "@virtual-haibin/payments": "workspace:*",
+    "@virtual-haibin/policy": "workspace:*",
+    "canonicalize": "^5.1.0"
   },
   "devDependencies": {
     "@types/node": "24.13.6"

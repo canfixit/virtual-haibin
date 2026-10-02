@@ -201,7 +201,7 @@ test("successful settlement consumes the reservation exactly and stores payment 
   assert.equal(invocation?.paymentAttempt?.payerSignature, "mock-payer-sig-1");
   assert.equal(invocation?.settlement?.transactionId, "mock-tx-1");
   assert.equal(invocation?.paymentRequirement?.amountAtomic, "10000");
-  assert.deepEqual(result.result, { result: "mock paid result 1" });
+  assert.deepEqual(result.result, { result: "mock paid result 1", request: { datasetId: "dataset-a", operation: "summarize" } });
   assert.equal(result.payment?.payTo, permit.recipient);
   assert.deepEqual(await budget(service, permit), {
     maxTotalAtomic: "50000",

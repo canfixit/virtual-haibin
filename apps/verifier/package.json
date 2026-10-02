@@ -1,19 +1,17 @@
 {
-  "name": "@virtual-haibin/approver",
+  "name": "@virtual-haibin/verifier",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
+    "verify": "tsx src/main.ts verify",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@solana/addresses": "^8.3.0",
-    "@solana/keys": "^8.3.0",
-    "@virtual-haibin/identity": "workspace:*",
-    "@virtual-haibin/mandate": "workspace:*"
+    "@virtual-haibin/evidence": "workspace:*",
+    "@virtual-haibin/payments": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "24.13.6"

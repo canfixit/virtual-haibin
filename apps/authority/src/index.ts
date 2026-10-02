@@ -1,5 +1,4 @@
-import { getAddressFromPublicKey } from "@solana/addresses";
-import { generateKeyPair } from "@solana/keys";
+import { loadOrCreateSigningKey, publishPublicKey } from "@virtual-haibin/identity";
 import { SANDBOX_USDC_MINT, solanaPaymentSandboxProfile, X402ExactPaymentProvider } from "@virtual-haibin/payments";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -34,6 +33,15 @@ if (!trustedIssuerFile) {
   throw new Error("AUTHORITY_TRUSTED_ISSUER_FILE is required (see compose.yaml).");
 }
 
+// Persistent receipt/evidence signing key (authority-only volume, mode 0600)
+// and where its PUBLIC key is published for verifiers to pin.
+const receiptKeyFile = process.env.AUTHORITY_RECEIPT_KEY_FILE;
+const authorityTrustFile = process.env.AUTHORITY_TRUST_PUBLISH_FILE;
+
+if (!receiptKeyFile || !authorityTrustFile) {
+  throw new Error("AUTHORITY_RECEIPT_KEY_FILE and AUTHORITY_TRUST_PUBLISH_FILE are required (see compose.yaml).");
+}
+
 if (!databasePath) {
   throw new Error("AUTHORITY_DB_PATH is required (see compose.yaml).");
 }
@@ -56,14 +64,17 @@ if (!sharedSecret || sharedSecret.length < MIN_SECRET_LENGTH || sharedSecret ===
   );
 }
 
-// The authority's own signing key. It is generated fresh in this process
-// and never leaves it -- no other service, including the agent, has access
-// to it. This is distinct from any future Solana payment-signing key
-// (Phase 4); for now it signs only this service's own authorization
-// receipts (see receipt.ts). Receipts stored by an earlier process remain
-// valid evidence: each names the authority address that signed it.
-const authoritySigner = await generateKeyPair();
-const authorityAddress = await getAddressFromPublicKey(authoritySigner.publicKey);
+// The authority's receipt/evidence signing identity. Persistent (generated
+// once into the authority-only data volume, mode 0600, loaded as a
+// non-extractable key) so a verifier can pin ONE public key across
+// restarts. It signs decision receipts and evidence manifests only -- it is
+// distinct from the payment wallet below, the issuer key (approver) and the
+// agent identity. Never logged, never returned by any endpoint.
+mkdirSync(dirname(receiptKeyFile), { recursive: true });
+const receiptKey = await loadOrCreateSigningKey(receiptKeyFile);
+const authoritySigner = receiptKey.keyPair;
+const authorityAddress = receiptKey.address;
+publishPublicKey(authorityTrustFile, authorityAddress);
 
 // Settlement profile: Pay.sh Solana Payment Sandbox (hosted Surfpool test
 // validator; no real funds), pinned to one RPC. See settlement-profile.ts
@@ -148,6 +159,8 @@ server.listen(port, () => {
       port,
       authorityAddress,
       trustedIssuer: issuerEntitlement.issuer,
+      receiptKeyCreated: receiptKey.created,
+      authorityTrustFile,
       databasePath,
       recoveredToReconciliation: interrupted.reconciliationRequired.length,
       releasedNeverSubmitted: interrupted.releasedNeverSubmitted.length,

@@ -5,6 +5,7 @@ import {
   computePermitDigest,
   verifyAuthorizationRequestSignature,
   verifyPurchasePermitV2,
+  type AgentRequestSignature,
   type AuthorizationRequestV2,
   type SignedPurchasePermitV2,
 } from "@virtual-haibin/mandate";
@@ -26,6 +27,8 @@ import {
   type SignedAuthorizationReceipt,
   type UnsignedAuthorizationReceiptV1,
 } from "./receipt.js";
+import type { EvidenceBundleV1 } from "@virtual-haibin/evidence";
+import { buildEvidenceBundle, EvidenceExportError } from "./evidence-export.js";
 import { buildPaidRequest, paidServiceKey, selectAndValidateChallenge, type PaidServiceRegistry } from "./payment-challenge.js";
 import {
   InvalidStateTransitionError,
@@ -141,7 +144,10 @@ export type AuthorityReasonCode =
   | "PAYMENT_NOT_SUBMITTED"
   | "PAID_SERVICE_UNAVAILABLE"
   | "OUTBOUND_REQUEST_MISMATCH"
-  | "RECONCILIATION_REQUIRED";
+  | "RECONCILIATION_REQUIRED"
+  | "INVOCATION_NOT_FOUND"
+  | "EVIDENCE_NOT_FINAL"
+  | "EVIDENCE_UNAVAILABLE";
 
 /** A request the authority refused before (or instead of) producing a decision receipt. */
 export class AuthorityRequestError extends Error {
@@ -272,6 +278,8 @@ export class ReconciliationRequiredError extends AuthorityRequestError {
 type AuthenticatedRequest = {
   permit: SignedPurchasePermitV2;
   request: AuthorizationRequestV2;
+  /** The verified agent signature, normalized; kept for evidence export. */
+  agentSignature: AgentRequestSignature;
   operationDigest: string;
   fingerprint: string;
 };
@@ -383,6 +391,38 @@ export class AuthorityService {
       consumedAtomic: grant.consumedAtomic,
       remainingAtomic: (BigInt(grant.maxTotalAtomic) - committed).toString(),
     };
+  }
+
+  /**
+   * Exports the portable EvidenceBundleV1 for a decided invocation, with a
+   * manifest signed by this authority's (persistent) receipt key. Reads only
+   * the one invocation; there is no general query surface.
+   */
+  async exportEvidence(invocationId: string): Promise<EvidenceBundleV1> {
+    const invocation = await this.#store.getInvocation(invocationId);
+
+    if (invocation === null) {
+      throw new AuthorityRequestError(404, "INVOCATION_NOT_FOUND", `Invocation ${invocationId} does not exist.`, { invocationId });
+    }
+
+    try {
+      const bundle = await buildEvidenceBundle({
+        invocation,
+        paidServices: this.#paidServices,
+        authorityAddress: this.#authorityAddress,
+        signer: this.#authoritySigner,
+        issuedAt: this.#now(),
+      });
+      this.#log({ event: "authority.evidence_exported", invocationId, grantId: invocation.grantId, purchaseState: invocation.state });
+      return bundle;
+    } catch (error) {
+      if (error instanceof EvidenceExportError) {
+        this.#log({ event: "authority.evidence_refused", invocationId, reasonCode: error.reasonCode });
+        throw new AuthorityRequestError(409, error.reasonCode, error.message, { invocationId });
+      }
+
+      throw error;
+    }
   }
 
   /**
@@ -509,10 +549,12 @@ export class AuthorityService {
     }
 
     const operationDigest = await computeOperationDigest(request.operation);
-    return { permit, request, operationDigest, fingerprint: await computeRequestFingerprint(permit, request, operationDigest) };
+    // Verified above, so it is exactly {algorithm: "ed25519", signature: <base58>}.
+    const agentSignature: AgentRequestSignature = { algorithm: "ed25519", signature: (input.agentSignature as { signature: string }).signature };
+    return { permit, request, agentSignature, operationDigest, fingerprint: await computeRequestFingerprint(permit, request, operationDigest) };
   }
 
-  async #process({ permit, request, operationDigest, fingerprint }: AuthenticatedRequest): Promise<AuthorizeResult> {
+  async #process({ permit, request, agentSignature, operationDigest, fingerprint }: AuthenticatedRequest): Promise<AuthorizeResult> {
     const { invocationId } = request;
 
     // Known invocation: replay/conflict/reconciliation straight from durable
@@ -641,6 +683,7 @@ export class AuthorityService {
         amountAtomic: request.amountAtomic,
         decidedAt,
         paymentRequirement: requirement,
+        authorization: { permit, agentSignature },
       },
       evaluate,
     );

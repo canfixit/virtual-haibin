@@ -10,6 +10,10 @@ permissions:
   contents: read
 
 jobs:
+  # The ONLY required correctness gate. Everything here is reproducible
+  # without external services. The live Pay.sh sandbox integration runs in a
+  # separate manual/scheduled workflow (sandbox-integration.yml) so external
+  # flakiness can neither block merges nor weaken these assertions.
   # Job A: everything that must be reproducible without external services.
   # Unit, security, persistence and payment-protocol tests use local fakes
   # (in-memory/temporary SQLite, a fake x402 merchant, a fake Solana RPC).
@@ -35,67 +39,14 @@ jobs:
         run: |
           docker compose run --rm -T --no-deps agent sh -euc '
             pnpm install --frozen-lockfile
+            pnpm --filter @virtual-haibin/identity test
             pnpm --filter @virtual-haibin/mandate test
             pnpm --filter @virtual-haibin/policy test
             pnpm --filter @virtual-haibin/payments test
             pnpm --filter @virtual-haibin/authority test
             pnpm --filter @virtual-haibin/approver test
             pnpm --filter @virtual-haibin/agent test
+            pnpm --filter @virtual-haibin/evidence test
+            pnpm --filter @virtual-haibin/verifier test
             pnpm check
           '
-
-  # Job B: clearly labelled EXTERNAL integration test against the hosted
-  # Pay.sh Solana Payment Sandbox (Surfpool test validator; no real funds).
-  # The full stack only starts against the sandbox (the authority refuses to
-  # run unless its pinned RPC identifies as Surfnet), so stack startup lives
-  # here. An outage is reported as "sandbox unavailable", distinct from a
-  # genuine integration failure; neither is hidden.
-  sandbox-integration:
-    name: External integration — Pay.sh Solana Payment Sandbox
-    needs: deterministic
-    runs-on: ubuntu-latest
-    env:
-      SANDBOX_RPC_URL: https://402.surfnet.dev:8899
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Create ephemeral CI-only .env
-        run: echo "AUTHORITY_SHARED_SECRET=ci-only-$(openssl rand -hex 32)" > .env
-
-      - name: Preflight — sandbox availability
-        run: |
-          if ! curl --fail --silent --show-error --max-time 20 -H 'content-type: application/json' \
-               -d '{"jsonrpc":"2.0","id":1,"method":"getVersion","params":[]}' "$SANDBOX_RPC_URL" | grep -q surfnet-version; then
-            echo "::error title=Pay.sh sandbox unavailable::$SANDBOX_RPC_URL did not answer as a Surfnet sandbox. This is an external availability problem, not a Virtual Haibin test failure; re-run when the sandbox is back."
-            exit 1
-          fi
-
-      - name: Build and start the stack against the sandbox
-        run: docker compose up -d --build --wait
-
-      - name: Smoke test service health
-        run: |
-          curl --fail --silent --show-error http://localhost:5173/ > /dev/null
-          curl --fail --silent --show-error http://localhost:4000/health > /dev/null
-          curl --fail --silent --show-error http://localhost:4001/health > /dev/null
-          curl --fail --silent --show-error http://localhost:4002/health > /dev/null
-          curl --fail --silent --show-error http://localhost:4003/health > /dev/null
-
-      - name: Sandbox integration scenarios (approval, ALLOW, semantic denials, replay, conflict, reconciliation)
-        run: |
-          APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
-          docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/sandbox-integration.mjs
-
-      - name: Phase 4.5 semantic demo (same payment terms, different operation)
-        run: |
-          APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
-          docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/semantic-demo.mjs
-
-      - name: Show container logs on failure
-        if: failure()
-        run: docker compose logs
-
-      - name: Stop stack
-        if: always()
-        run: docker compose down -v

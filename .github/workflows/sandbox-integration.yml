@@ -1,0 +1,82 @@
+name: Sandbox integration (external)
+
+# EXTERNAL integration against the hosted Pay.sh Solana Payment Sandbox
+# (Surfpool test validator; no real funds). Deliberately separate from the
+# required "CI" workflow: it depends on third-party availability, so it runs
+# on demand and on a schedule, never as a merge gate.
+#
+# Failures are classified, never hidden:
+#   "Integration regression"                -> a product assertion failed
+#   "External sandbox/environment failure"  -> sandbox/RPC/facilitator trouble or an
+#                                              uncertain externally submitted payment
+#                                              (kept RECONCILIATION_REQUIRED, not retried)
+# Re-run manually: Actions -> "Sandbox integration (external)" -> Run workflow.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-integration
+  cancel-in-progress: false
+
+jobs:
+  sandbox-integration:
+    name: External integration — Pay.sh Solana Payment Sandbox
+    runs-on: ubuntu-latest
+    env:
+      SANDBOX_RPC_URL: https://402.surfnet.dev:8899
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create ephemeral CI-only .env
+        run: echo "AUTHORITY_SHARED_SECRET=ci-only-$(openssl rand -hex 32)" > .env
+
+      - name: Preflight — sandbox availability
+        run: |
+          if ! curl --fail --silent --show-error --max-time 20 -H 'content-type: application/json' \
+               -d '{"jsonrpc":"2.0","id":1,"method":"getVersion","params":[]}' "$SANDBOX_RPC_URL" | grep -q surfnet-version; then
+            echo "::error title=External sandbox/environment failure — preflight::$SANDBOX_RPC_URL did not answer as a Surfnet sandbox. Not a Virtual Haibin test failure; re-run when the sandbox is back."
+            exit 3
+          fi
+
+      - name: Build and start the stack against the sandbox
+        run: docker compose up -d --build --wait
+
+      - name: Smoke test service health
+        run: |
+          curl --fail --silent --show-error http://localhost:5173/ > /dev/null
+          curl --fail --silent --show-error http://localhost:4000/health > /dev/null
+          curl --fail --silent --show-error http://localhost:4001/health > /dev/null
+          curl --fail --silent --show-error http://localhost:4002/health > /dev/null
+          curl --fail --silent --show-error http://127.0.0.1:4003/health > /dev/null
+
+      - name: Sandbox integration scenarios (approval, ALLOW, semantic denials, replay, conflict, reconciliation)
+        run: |
+          APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
+          scripts/ci-external-step.sh "sandbox-integration" \
+            docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/sandbox-integration.mjs
+
+      - name: Phase 4.5 semantic demo (same payment terms, different operation)
+        if: success() || failure()
+        run: |
+          APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
+          scripts/ci-external-step.sh "semantic-demo" \
+            docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/semantic-demo.mjs
+
+      - name: Phase 5 portable evidence (export, stop authority, offline + online verify, tampering, restart)
+        if: success() || failure()
+        run: scripts/ci-external-step.sh "evidence-demo" ./scripts/evidence-demo.sh
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v
