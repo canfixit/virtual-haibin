@@ -426,6 +426,33 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    // UI relay for the portable evidence of one invocation. The browser must
+    // not hold the authority's bearer secret, so the agent fetches the bundle
+    // for it. Relaying is safe: the bundle is checked by signatures against
+    // pinned keys, never trusted because of who delivered it.
+    if (request.method === "GET" && request.url?.startsWith("/evidence/")) {
+      const invocationId = decodeURIComponent(request.url.slice("/evidence/".length));
+
+      if (!INVOCATION_ID_PATTERN.test(invocationId)) {
+        throw new HttpInputError("invocationId must be 1-128 characters of [A-Za-z0-9_.:-].", 400);
+      }
+
+      const upstream = await fetch(`${authorityUrl}/evidence/${encodeURIComponent(invocationId)}`, {
+        headers: { authorization: `Bearer ${authoritySharedSecret}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      const text = await upstream.text();
+
+      if (text.length > 512 * 1024) {
+        throw new Error("Evidence bundle exceeds the size limit.");
+      }
+
+      setCors(response);
+      response.writeHead(upstream.status, { "content-type": "application/json; charset=utf-8" });
+      response.end(text);
+      return;
+    }
+
     if (request.method === "POST" && request.url === "/demo") {
       // TRANSITIONAL demo entry point for the current UI. Phase 7 replaces it
       // with the judge-facing permission / attempt / decision / effect views.

@@ -160,6 +160,16 @@ React UI
 
 **Phase 4.5: same payment, different meaning.** The paid service has one endpoint, `POST /api/v1/report`, where `summarize` and `export` cost exactly the same (same price, payTo, asset, network). The human approves `summarize(dataset-a)`. A fresh request for `export(dataset-a)` is denied with `OPERATION_NOT_AUTHORIZED`, and `summarize(dataset-b)` with `OPERATION_ARGUMENT_NOT_AUTHORIZED`. Neither is reserved, contacts the service or signs a payment. A permit signed by any key other than the pinned issuer is refused with `ISSUER_NOT_ENTITLED`. A valid payment does not necessarily mean the agent was authorized to buy that operation. See [docs/human-approval-and-semantic-authorization.md](docs/human-approval-and-semantic-authorization.md).
 
+**Judge-facing UI (Phase 6).** `http://localhost:5173` is a single page in the CanFixIT visual language. Blue marks human approval, red marks the attempted violation, and purple marks Virtual Haibin and verification. It walks through:
+
+1. human approval
+2. the approved `summarize(dataset-a)` against the unauthorized `export(dataset-a)`
+3. the real purchase timeline
+4. a side-by-side comparison showing that only the operation differs
+5. the standalone verifier's report on the exported evidence
+
+Everything shown comes from real backend responses. The verifier runs as `verifier-api` on port 4004: the standalone verifier library, isolated on its own network with pinned public trust keys. Brand colours are three CSS variables in `apps/web/src/theme.css`. See [docs/judge-demo-ui.md](docs/judge-demo-ui.md).
+
 The current UI exposes:
 
 - human approval of `summarize(dataset-a)` (requires the approval code from `docker compose exec approver cat /keys/approval-code`)

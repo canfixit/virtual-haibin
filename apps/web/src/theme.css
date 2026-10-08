@@ -1,0 +1,70 @@
+/*
+ * Virtual Haibin × CanFixIT design tokens.
+ *
+ * THE ONLY PLACE COLOURS ARE DEFINED. Components use these variables only.
+ *
+ * Brand reference: https://www.canfixit.com.au (Tailwind-based). Its
+ * stylesheet uses the Tailwind blue-500/600, red-500/600 and
+ * purple-500/600/800 families on white / gray-50 surfaces with gray-900
+ * bands, rounded-lg corners and the system UI font stack. The defaults
+ * below are the 600 shades.
+ *
+ * >>> ADJUST THESE THREE TO FINE-TUNE THE BRAND <<<
+ * Every tint, border and strong variant is derived from them.
+ */
+:root {
+  --canfixit-blue: #2563eb; /* TODO(brand): Blue Team — human approval, trusted issuer, permitted scope */
+  --canfixit-red: #dc2626; /* TODO(brand): Red Team — attempted violation, blocked, no payment */
+  --canfixit-purple: #9333ea; /* TODO(brand): Purple Team — Virtual Haibin, verification, evidence */
+
+  /* Neutrals (Tailwind gray, as used on canfixit.com.au) */
+  --gray-50: #f9fafb;
+  --gray-100: #f3f4f6;
+  --gray-200: #e5e7eb;
+  --gray-300: #d1d5db;
+  --gray-400: #9ca3af;
+  --gray-500: #6b7280;
+  --gray-600: #4b5563;
+  --gray-700: #374151;
+  --gray-800: #1f2937;
+  --gray-900: #111827;
+  --white: #ffffff;
+
+  /* Semantic surfaces and text */
+  --surface-page: var(--gray-50);
+  --surface-primary: var(--white);
+  --surface-secondary: var(--gray-100);
+  --surface-inverse: var(--gray-900);
+  --surface-inverse-raised: var(--gray-800);
+  --text-primary: var(--gray-900);
+  --text-secondary: var(--gray-600);
+  --text-muted: var(--gray-500);
+  --text-inverse: var(--gray-50);
+  --text-inverse-muted: var(--gray-400);
+  --border-subtle: var(--gray-200);
+  --border-strong: var(--gray-300);
+  --border-inverse: var(--gray-700);
+
+  /* Derived brand tints (change the three brand colours above, not these) */
+  --blue-tint: color-mix(in srgb, var(--canfixit-blue) 8%, var(--white));
+  --blue-border: color-mix(in srgb, var(--canfixit-blue) 35%, var(--white));
+  --blue-strong: color-mix(in srgb, var(--canfixit-blue) 80%, var(--gray-900));
+  --red-tint: color-mix(in srgb, var(--canfixit-red) 7%, var(--white));
+  --red-border: color-mix(in srgb, var(--canfixit-red) 35%, var(--white));
+  --red-strong: color-mix(in srgb, var(--canfixit-red) 82%, var(--gray-900));
+  --purple-tint: color-mix(in srgb, var(--canfixit-purple) 8%, var(--white));
+  --purple-border: color-mix(in srgb, var(--canfixit-purple) 35%, var(--white));
+  --purple-strong: color-mix(in srgb, var(--canfixit-purple) 80%, var(--gray-900));
+  --purple-on-dark: color-mix(in srgb, var(--canfixit-purple) 55%, var(--white));
+  --blue-on-dark: color-mix(in srgb, var(--canfixit-blue) 55%, var(--white));
+  --red-on-dark: color-mix(in srgb, var(--canfixit-red) 55%, var(--white));
+
+  /* Type, shape, rhythm */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --radius: 8px;
+  --radius-small: 6px;
+  --shadow-card: 0 1px 2px rgb(17 24 39 / 0.06), 0 1px 3px rgb(17 24 39 / 0.08);
+  --page-width: 1120px;
+  --gutter: 24px;
+}

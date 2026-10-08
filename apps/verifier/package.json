@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "verify": "tsx src/main.ts verify",
+    "serve": "tsx src/serve.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'"
   },

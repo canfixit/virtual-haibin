@@ -290,12 +290,56 @@ services:
   verifier-online:
     <<: *verifier
 
+  # The standalone verifier library behind a small HTTP front, so the demo UI
+  # shows REAL verifier output. Own network: it cannot resolve or reach the
+  # authority, agent, approver or service; read-only repo, deps and PUBLIC
+  # trust files only; online mode reaches just the sandbox RPC.
+  verifier-api:
+    image: virtual-haibin-dev:local
+    working_dir: /workspace
+    command: ["node", "--import", "tsx", "apps/verifier/src/serve.ts"]
+    environment:
+      VERIFIER_PORT: "4004"
+      VERIFIER_ISSUER_TRUST_FILE: "/trust/issuer/trusted-issuer"
+      VERIFIER_AUTHORITY_TRUST_FILE: "/trust/authority/authority.pub"
+      VERIFIER_SERVICE_TRUST_FILE: "/trust/service/service.pub"
+      VERIFIER_RPC_URL: *sandbox-rpc
+      VERIFIER_ALLOWED_ORIGIN: "http://localhost:5173"
+    ports:
+      - "4004:4004"
+    networks:
+      - verification
+    volumes:
+      - .:/workspace:ro
+      - root_node_modules:/workspace/node_modules:ro
+      - verifier_node_modules:/workspace/apps/verifier/node_modules:ro
+      - evidence_node_modules:/workspace/packages/evidence/node_modules:ro
+      - mandate_node_modules:/workspace/packages/mandate/node_modules:ro
+      - payments_node_modules:/workspace/packages/payments/node_modules:ro
+      - policy_node_modules:/workspace/packages/policy/node_modules:ro
+      - issuer_trust:/trust/issuer:ro
+      - authority_trust:/trust/authority:ro
+      - service_trust:/trust/service:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:4004/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   web:
     <<: *app-image
     command: ["pnpm", "dev:web"]
     environment:
       VITE_AGENT_API_URL: "http://localhost:4000"
       VITE_APPROVER_API_URL: "http://localhost:4003"
+      VITE_VERIFIER_API_URL: "http://localhost:4004"
     ports:
       - "5173:5173"
     volumes: *dev-volumes
@@ -331,3 +375,5 @@ networks:
   default:
   # The approver alone. Nothing else joins it except the demo-driver tool.
   approval:
+  # The UI-facing verifier alone (internet egress for --online RPC only).
+  verification:

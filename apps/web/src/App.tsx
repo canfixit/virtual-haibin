@@ -1,256 +1,215 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { approve, getAgentIdentity, getApproverTerms, getEvidence, installPermit, runOperation, verifyEvidence, type ApprovalTerms } from "./api";
+import { Comparison } from "./components/Comparison";
+import { ActionCards, APPROVED, ApprovalCard, OutcomeCard, Timeline, VIOLATION } from "./components/Demo";
+import { DetailsPanel, JsonBlock } from "./components/Details";
+import { EvidencePanel } from "./components/Evidence";
+import { Journey } from "./components/Journey";
+import { ErrorNote, Header, Hero, Section } from "./components/Layout";
+import { buildComparison, buildTimeline, opLabel, type DemoResponse, type Permit, type VerificationReport } from "./model";
 
-const agentApiUrl = import.meta.env.VITE_AGENT_API_URL ?? "http://localhost:4000";
-const approverApiUrl = import.meta.env.VITE_APPROVER_API_URL ?? "http://localhost:4003";
+type Run = { httpStatus: number; response: DemoResponse };
+type Kind = "allow" | "deny";
 
-type DemoScenario = "honest" | "overcharge" | "wrong-recipient" | "wrong-asset";
-
-type DemoRequest = {
-  operation: "summarize" | "export";
-  datasetId: string;
-  scenario: DemoScenario;
-};
-
-type PermitSummary = {
-  grantId: string;
-  issuer: string;
-  operation: { method: string; resource: string; operation: string; datasetId: string };
-  maxPerCallAtomic: string;
-  maxTotalAtomic: string;
-  recipient: string;
-  mint: string;
-  expiresAt: number;
-};
-
-type DemoResponse = {
-  status?: string;
-  operation?: { operation: string; datasetId: string };
-  quote?: { amountAtomic: string; recipient: string; mint: string };
-  authorization?: {
-    decision: "ALLOW" | "DENY";
-    replay: boolean;
-    receipt: { reasonCodes: string[] };
-    payment: { transactionId: string | null; payTo: string | null; asset: string | null; amountAtomic: string | null } | null;
-  };
-  authority?: { reasonCode?: string };
-};
-
-type RunState =
-  | { status: "idle" }
-  | { status: "loading"; label: string }
-  | { status: "done"; label: string; httpStatus: number; response: DemoResponse }
-  | { status: "error"; label: string; message: string };
-
-async function postJson(url: string, body: unknown, headers: Record<string, string> = {}): Promise<{ httpStatus: number; json: unknown }> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify(body),
-  });
-  return { httpStatus: response.status, json: (await response.json()) as unknown };
-}
+const message = (error: unknown) => (error instanceof Error ? error.message : "Unexpected error");
 
 export function App() {
   const [agent, setAgent] = useState<string | null>(null);
-  const [permit, setPermit] = useState<PermitSummary | null>(null);
-  // The human's approval code; kept only in page memory, never sent to the agent.
-  const [approvalCode, setApprovalCode] = useState("");
+  const [terms, setTerms] = useState<ApprovalTerms | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
+
+  const [permit, setPermit] = useState<Permit | null>(null);
+  const [approving, setApproving] = useState(false);
   const [approvalError, setApprovalError] = useState<string | null>(null);
-  const [run, setRun] = useState<RunState>({ status: "idle" });
+
+  const [runs, setRuns] = useState<Partial<Record<Kind, Run>>>({});
+  const [latest, setLatest] = useState<Kind | null>(null);
+  const [running, setRunning] = useState<Kind | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  const [bundle, setBundle] = useState<string | null>(null);
+  const [report, setReport] = useState<VerificationReport | null>(null);
+  const [trust, setTrust] = useState<{ issuer: string; authority: string; service: string | null } | null>(null);
+  const [verifying, setVerifying] = useState<"offline" | "online" | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+
+  const [extraRuns, setExtraRuns] = useState<Array<{ label: string; run: Run }>>([]);
 
   useEffect(() => {
-    void fetch(`${agentApiUrl}/identity`)
-      .then((response) => response.json() as Promise<{ agent: string }>)
-      .then((body) => setAgent(body.agent))
-      .catch(() => setAgent(null));
+    getAgentIdentity()
+      .then(setAgent)
+      .catch(() => setSetupError("The agent is not reachable on its configured URL."));
+    getApproverTerms()
+      .then((health) => setTerms(health.terms))
+      .catch(() => setSetupError("The approval service is not reachable on its configured URL."));
   }, []);
 
-  // Human action: the approver (outside the agent runtime) signs a permit for
-  // exactly summarize(dataset-a); the agent only receives the signed permit.
-  const approve = async () => {
+  // Human action: the approver signs; the agent receives only the signed permit.
+  const onApprove = async (approvalCode: string): Promise<boolean> => {
+    if (agent === null) return false;
+    setApproving(true);
     setApprovalError(null);
 
     try {
-      const issued = await postJson(
-        `${approverApiUrl}/approvals`,
-        { agent, operation: "summarize", datasetId: "dataset-a" },
-        { authorization: `Bearer ${approvalCode.trim()}` },
-      );
-
-      if (issued.httpStatus !== 201) {
-        throw new Error(JSON.stringify(issued.json));
-      }
-
-      // The approval code has done its job; drop it from page state immediately.
-      setApprovalCode("");
-      const signedPermit = (issued.json as { permit: PermitSummary }).permit;
-      const installed = await postJson(`${agentApiUrl}/permit`, { permit: signedPermit });
-
-      if (installed.httpStatus !== 200) {
-        throw new Error(JSON.stringify(installed.json));
-      }
-
-      setPermit(signedPermit);
+      const issued = await approve(agent, approvalCode, APPROVED.operation, APPROVED.datasetId);
+      await installPermit(issued);
+      setPermit(issued);
+      setRuns({});
+      setLatest(null);
+      setBundle(null);
+      setReport(null);
+      return true;
     } catch (error) {
-      setApprovalError(error instanceof Error ? error.message : "Approval failed");
+      setApprovalError(message(error));
+      return false;
+    } finally {
+      setApproving(false);
     }
   };
 
-  const execute = async (label: string, request: DemoRequest) => {
-    setRun({ status: "loading", label });
+  const verify = async (bundleText: string, mode: "offline" | "online") => {
+    setVerifying(mode);
+    setEvidenceError(null);
 
     try {
-      const { httpStatus, json } = await postJson(`${agentApiUrl}/demo`, request);
-      setRun({ status: "done", label, httpStatus, response: json as DemoResponse });
+      const verified = await verifyEvidence(bundleText, mode);
+      setReport(verified.report);
+      setTrust(verified.trust);
     } catch (error) {
-      setRun({ status: "error", label, message: error instanceof Error ? error.message : "Unknown error" });
+      setEvidenceError(message(error));
+    } finally {
+      setVerifying(null);
     }
   };
 
-  const busy = run.status === "loading";
-  const noPermit = permit === null;
+  const onRun = async (kind: Kind) => {
+    setRunning(kind);
+    setRunError(null);
 
-  return (
-    <main className="shell">
-      <section className="hero">
-        <p className="eyebrow">Virtual Haibin</p>
-        <h1>Pay only for what the human approved.</h1>
-        <p className="summary">
-          Two requests can carry exactly the same payment terms (merchant, recipient, asset, price, network) and still mean
-          different things. The authority pays only for the business operation the human signed.
-        </p>
-      </section>
+    try {
+      const run = await runOperation(kind === "allow" ? APPROVED : VIOLATION);
+      setRuns((previous) => ({ ...previous, [kind]: run }));
+      setLatest(kind);
 
-      <section className="panel">
-        <h2>1. Human approval</h2>
-        <p>
-          Agent identity: <code>{agent ?? "unavailable"}</code>
-        </p>
-        <label className="field">
-          Approval code <span className="muted">(docker compose exec approver cat /keys/approval-code)</span>
-          <input type="password" autoComplete="off" value={approvalCode} onChange={(event) => setApprovalCode(event.target.value)} />
-        </label>
-        <div className="actions">
-          <button type="button" disabled={agent === null || approvalCode.trim() === ""} onClick={() => void approve()}>
-            Approve “Summarize dataset-a”
-          </button>
-        </div>
-        {approvalError && <p className="deny">Approval failed: {approvalError}</p>}
-        {permit && (
-          <dl className="facts">
-            <dt>Approved operation</dt>
-            <dd>
-              {permit.operation.method} {permit.operation.resource} — <strong>{permit.operation.operation}</strong>(
-              {permit.operation.datasetId})
-            </dd>
-            <dt>Issuer (human)</dt>
-            <dd>
-              <code>{permit.issuer}</code>
-            </dd>
-            <dt>Recipient / mint</dt>
-            <dd>
-              <code>{permit.recipient}</code> / <code>{permit.mint}</code>
-            </dd>
-            <dt>Limits</dt>
-            <dd>
-              {permit.maxPerCallAtomic} per call, {permit.maxTotalAtomic} total (base units)
-            </dd>
-            <dt>Expires</dt>
-            <dd>{new Date(permit.expiresAt).toLocaleTimeString()}</dd>
-          </dl>
-        )}
-      </section>
+      const { authorization, invocationId } = run.response;
 
-      <section className="panel">
-        <h2>2. Agent requests — all quoted at the same price (10000 base units)</h2>
-        <div className="actions">
-          <button
-            type="button"
-            disabled={busy || noPermit}
-            onClick={() => void execute("summarize(dataset-a) — approved", { operation: "summarize", datasetId: "dataset-a", scenario: "honest" })}
-          >
-            Run approved operation
-          </button>
-          <button
-            type="button"
-            disabled={busy || noPermit}
-            onClick={() => void execute("export(dataset-a) — same price, not approved", { operation: "export", datasetId: "dataset-a", scenario: "honest" })}
-          >
-            Try unauthorized export
-          </button>
-          <button
-            type="button"
-            disabled={busy || noPermit}
-            onClick={() => void execute("summarize(dataset-b) — same price, other dataset", { operation: "summarize", datasetId: "dataset-b", scenario: "honest" })}
-          >
-            Try summarize dataset-b
-          </button>
-        </div>
-        <p className="muted">Misbehaving merchant (approved operation, but the real 402 differs from the quote):</p>
-        <div className="actions secondary">
-          {(["overcharge", "wrong-recipient", "wrong-asset"] as const).map((scenario) => (
-            <button
-              key={scenario}
-              type="button"
-              disabled={busy || noPermit}
-              onClick={() => void execute(`summarize(dataset-a), merchant ${scenario}`, { operation: "summarize", datasetId: "dataset-a", scenario })}
-            >
-              {scenario}
-            </button>
-          ))}
-        </div>
-      </section>
+      // A completed purchase: fetch its real evidence and verify it offline.
+      if (kind === "allow" && authorization?.decision === "ALLOW" && authorization.payment?.transactionId && invocationId) {
+        setBundle(null);
+        setReport(null);
 
-      <section className="panel output" aria-live="polite">
-        <h2>3. Decision and effect</h2>
-        {run.status === "idle" && <p>No request has been executed yet.</p>}
-        {run.status === "loading" && <p>Running {run.label}…</p>}
-        {run.status === "error" && <p className="deny">{run.message}</p>}
-        {run.status === "done" && <Outcome label={run.label} httpStatus={run.httpStatus} response={run.response} />}
-      </section>
-    </main>
+        try {
+          const exported = await getEvidence(invocationId);
+          setBundle(exported);
+          await verify(exported, "offline");
+        } catch (error) {
+          setEvidenceError(message(error));
+        }
+      }
+    } catch (error) {
+      setRunError(message(error));
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  const onExtra = async (label: string, body: { operation: string; datasetId: string; scenario?: string }) => {
+    try {
+      const run = await runOperation(body);
+      setExtraRuns((previous) => [{ label, run }, ...previous].slice(0, 6));
+    } catch (error) {
+      setRunError(message(error));
+    }
+  };
+
+  const latestRun = latest ? runs[latest] : undefined;
+  const timeline = useMemo(
+    () => (latestRun ? buildTimeline(latestRun.response, { bundleFetched: latest === "allow" && bundle !== null, report: latest === "allow" ? report : null }) : null),
+    [latestRun, latest, bundle, report],
   );
-}
-
-function Outcome({ label, httpStatus, response }: { label: string; httpStatus: number; response: DemoResponse }) {
-  const authorization = response.authorization;
-  const decision = authorization?.decision ?? "REFUSED";
-  const reasons = authorization?.receipt.reasonCodes ?? (response.authority?.reasonCode ? [response.authority.reasonCode] : []);
-  const transactionId = authorization?.payment?.transactionId ?? null;
+  const comparison = useMemo(() => buildComparison(permit, runs.allow?.response ?? null, runs.deny?.response ?? null), [permit, runs]);
+  const journeyOutcome = !latestRun?.response.authorization ? "none" : latestRun.response.authorization.decision === "ALLOW" ? "allowed" : "blocked";
 
   return (
     <>
-      <p>{label}</p>
-      <p className={decision === "ALLOW" ? "allow decision" : "deny decision"}>
-        {decision}
-        {authorization?.replay ? " (replay)" : ""}
-      </p>
-      <dl className="facts">
-        <dt>Reason codes</dt>
-        <dd>{reasons.length > 0 ? reasons.join(", ") : "—"}</dd>
-        <dt>Quoted terms</dt>
-        <dd>
-          {response.quote ? (
-            <>
-              {response.quote.amountAtomic} to <code>{response.quote.recipient}</code>
-            </>
-          ) : (
-            "—"
-          )}
-        </dd>
-        <dt>Payment submitted</dt>
-        <dd>{transactionId ? "yes" : "no"}</dd>
-        <dt>Sandbox transaction</dt>
-        <dd>{transactionId ? <code>{transactionId}</code> : "none"}</dd>
-        <dt>Agent status</dt>
-        <dd>
-          {response.status} (HTTP {httpStatus})
-        </dd>
-      </dl>
-      <details>
-        <summary>Inspect raw response</summary>
-        <pre>{JSON.stringify(response, null, 2)}</pre>
-      </details>
+      <Header />
+      <Hero />
+      <main>
+        <Section id="demo" step="01" title="Human approval" tone="blue" lede="A person approves one exact operation. The approval happens outside the agent.">
+          <ErrorNote message={setupError} />
+          <ApprovalCard agent={agent} terms={terms} permit={permit} busy={approving} error={approvalError} onApprove={onApprove} />
+        </Section>
+
+        <Section id="action" step="02" title="Agent action" lede="Both requests cost exactly the same. Only the business operation differs.">
+          <ActionCards enabled={permit !== null} busy={running} onRun={(kind) => void onRun(kind)} />
+          <ErrorNote message={runError} />
+        </Section>
+
+        {latestRun && timeline && (
+          <Section id="result" step="03" title={latest === "deny" ? "Decision: blocked" : "Decision: authorized"} tone={latest === "deny" ? "red" : "purple"}>
+            <div className="result-grid">
+              <OutcomeCard run={latestRun} approved={permit?.operation ?? null} />
+              <div className="card">
+                <p className="card-kicker">Purchase timeline · {opLabel(latestRun.response.operation)}</p>
+                <Timeline steps={timeline} />
+              </div>
+            </div>
+          </Section>
+        )}
+
+        <Section id="compare" step="04" title="Same payment. Different operation." lede="Both requests, side by side, from the authority's signed decisions.">
+          <Comparison rows={comparison} haveBoth={Boolean(runs.allow && runs.deny)} />
+        </Section>
+
+        <Section id="how" title="How it works" lede="Each stop is an independent check. A denied operation stops at the authority: nothing is paid.">
+          <Journey outcome={journeyOutcome} />
+        </Section>
+
+        <Section id="evidence" title="Verify evidence" tone="purple">
+          <EvidencePanel
+            available={bundle !== null}
+            report={report}
+            trust={trust}
+            busy={verifying}
+            error={evidenceError}
+            onVerify={(mode) => bundle !== null && void verify(bundle, mode)}
+          />
+        </Section>
+
+        <Section id="details" title="Technical details" lede="Raw protocol objects and additional adversarial tests.">
+          <DetailsPanel>
+            <div className="button-row">
+              <button className="button button-outline" type="button" disabled={permit === null} onClick={() => void onExtra("summarize(dataset-b) — unapproved argument", { operation: "summarize", datasetId: "dataset-b" })}>
+                Try summarize(dataset-b)
+              </button>
+              {(["overcharge", "wrong-recipient", "wrong-asset"] as const).map((scenario) => (
+                <button key={scenario} className="button button-outline" type="button" disabled={permit === null} onClick={() => void onExtra(`merchant ${scenario}`, { ...APPROVED, scenario })}>
+                  Merchant: {scenario}
+                </button>
+              ))}
+            </div>
+            {extraRuns.length > 0 && (
+              <ul className="extra-runs">
+                {extraRuns.map(({ label, run }, index) => (
+                  <li key={`${label}-${index}`}>
+                    <span>{label}</span>
+                    <span className={`status ${run.response.authorization?.decision === "ALLOW" ? "status-verified" : "status-invalid"}`}>{run.response.authorization?.decision ?? run.response.status}</span>
+                    <span className="mono">{run.response.authorization?.receipt.reasonCodes.join(", ") || run.response.authority?.reasonCode || "—"}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <JsonBlock title="Signed PurchasePermit" value={permit} />
+            <JsonBlock title="Approved request — agent response" value={runs.allow?.response} />
+            <JsonBlock title="Unauthorized request — agent response" value={runs.deny?.response} />
+            <JsonBlock title="Evidence bundle" value={bundle ? JSON.parse(bundle) : null} />
+            <JsonBlock title="Verifier report" value={report} />
+          </DetailsPanel>
+        </Section>
+      </main>
+      <footer className="site-footer">
+        <div className="container">CanFixIT · Virtual Haibin — Solana payment sandbox demo. No real funds are used.</div>
+      </footer>
     </>
   );
 }
