@@ -168,7 +168,7 @@ React UI
 4. a side-by-side comparison showing that only the operation differs
 5. the standalone verifier's report on the exported evidence
 
-Everything shown comes from real backend responses. The verifier runs as `verifier-api` on port 4004: the standalone verifier library, isolated on its own network with pinned public trust keys. Brand colours are three CSS variables in `apps/web/src/theme.css`. See [docs/judge-demo-ui.md](docs/judge-demo-ui.md).
+Everything shown comes from real backend responses. The verifier runs as `verifier-api` on port 4004: the standalone verifier library, isolated on its own network with pinned public trust keys. Brand colours are three CSS variables in `apps/web/src/theme.css`. Agent API calls are scoped to a per-page demo session capability, so one visitor cannot use another's permit, purchases or evidence. See [docs/judge-demo-ui.md](docs/judge-demo-ui.md).
 
 The current UI exposes:
 

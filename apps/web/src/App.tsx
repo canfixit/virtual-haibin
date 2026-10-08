@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { approve, getAgentIdentity, getApproverTerms, getEvidence, installPermit, runOperation, verifyEvidence, type ApprovalTerms } from "./api";
+import { ApiError, approve, getAgentIdentity, getApproverTerms, getEvidence, installPermit, runOperation, startSession, verifyEvidence, type ApprovalTerms } from "./api";
 import { Comparison } from "./components/Comparison";
 import { ActionCards, APPROVED, ApprovalCard, OutcomeCard, Timeline, VIOLATION } from "./components/Demo";
 import { DetailsPanel, JsonBlock } from "./components/Details";
@@ -11,7 +11,12 @@ import { buildComparison, buildTimeline, opLabel, type DemoResponse, type Permit
 type Run = { httpStatus: number; response: DemoResponse };
 type Kind = "allow" | "deny";
 
-const message = (error: unknown) => (error instanceof Error ? error.message : "Unexpected error");
+const message = (error: unknown) =>
+  error instanceof ApiError && error.status === 401
+    ? "Your demo session has ended. A new one was started: approve the permission again."
+    : error instanceof Error
+      ? error.message
+      : "Unexpected error";
 
 export function App() {
   const [agent, setAgent] = useState<string | null>(null);
@@ -36,6 +41,8 @@ export function App() {
   const [extraRuns, setExtraRuns] = useState<Array<{ label: string; run: Run }>>([]);
 
   useEffect(() => {
+    // One agent session per page load: permits and purchases are scoped to it.
+    startSession().catch(() => setSetupError("The agent is not reachable on its configured URL."));
     getAgentIdentity()
       .then(setAgent)
       .catch(() => setSetupError("The agent is not reachable on its configured URL."));
@@ -61,6 +68,7 @@ export function App() {
       return true;
     } catch (error) {
       setApprovalError(message(error));
+      await recoverExpiredSession(error);
       return false;
     } finally {
       setApproving(false);
@@ -108,8 +116,18 @@ export function App() {
       }
     } catch (error) {
       setRunError(message(error));
+      await recoverExpiredSession(error);
     } finally {
       setRunning(null);
+    }
+  };
+
+  // An expired/evicted session cannot be resumed: start a fresh one, which
+  // owns nothing, so the human must approve again.
+  const recoverExpiredSession = async (error: unknown) => {
+    if (error instanceof ApiError && error.status === 401) {
+      setPermit(null);
+      await startSession().catch(() => setSetupError("The agent is not reachable on its configured URL."));
     }
   };
 

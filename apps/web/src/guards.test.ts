@@ -50,3 +50,13 @@ test("the UI never claims mainnet or real funds", () => {
   }
   assert.match(files.find((file) => file.name === "components/Layout.tsx")?.text ?? "", /no real funds/i);
 });
+
+test("the agent session capability lives in page memory and travels only as an Authorization header", () => {
+  const api = files.find((file) => file.name === "api.ts")?.text ?? "";
+  assert.match(api, /let sessionToken: string \| null = null;/);
+  assert.match(api, /authorization: `Bearer \$\{sessionToken\}`/);
+  // Never interpolated into a URL.
+  for (const line of api.split("\n").filter((candidate) => candidate.includes("fetch("))) {
+    assert.doesNotMatch(line, /sessionToken/, line);
+  }
+});

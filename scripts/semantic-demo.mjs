@@ -13,6 +13,8 @@
 
 import { EXIT_EXTERNAL, EXIT_REGRESSION, isExternalPaymentFailure } from "./lib/outcome.mjs";
 
+import { agentSession } from "./lib/agent-session.mjs";
+
 const AGENT_URL = process.env.AGENT_URL ?? "http://agent:4000";
 const APPROVER_URL = process.env.APPROVER_URL ?? "http://approver:4003";
 // The human's approval code (from the approver's private volume), supplied by the operator.
@@ -58,7 +60,7 @@ function record(entry) {
 
 /** Agent /demo call, reduced to what the judge needs to see. */
 async function agentRequest(step, invocationId, operation, datasetId) {
-  const { httpStatus, json } = await postJson(`${AGENT_URL}/demo`, { invocationId, operation, datasetId });
+  const { httpStatus, json } = await postJson(`${AGENT_URL}/demo`, { invocationId, operation, datasetId }, session);
   const authorization = json.authorization ?? null;
   const payment = authorization?.payment ?? null;
   const entry = {
@@ -98,6 +100,8 @@ async function agentRequest(step, invocationId, operation, datasetId) {
 }
 
 const run = `p45-${Date.now()}`;
+// Permit, purchases and evidence are scoped to this agent session.
+const session = await agentSession(AGENT_URL);
 
 // 0. Identities and the merchant's quote (identical for every operation).
 const { json: identity } = await getJson(`${AGENT_URL}/identity`);
@@ -128,7 +132,7 @@ const issued = await postJson(
 );
 expect("APPROVE", "approver issued a permit", issued.httpStatus === 201);
 const permit = issued.json.permit;
-const installed = await postJson(`${AGENT_URL}/permit`, { permit });
+const installed = await postJson(`${AGENT_URL}/permit`, { permit }, session);
 expect("APPROVE", "agent installed the signed permit", installed.httpStatus === 200);
 record({
   step: "APPROVE",

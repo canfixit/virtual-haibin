@@ -12,6 +12,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { EXIT_EXTERNAL, isExternalPaymentFailure } from "./lib/outcome.mjs";
 
+import { agentSession } from "./lib/agent-session.mjs";
+
 const AGENT_URL = process.env.AGENT_URL ?? "http://agent:4000";
 const APPROVER_URL = process.env.APPROVER_URL ?? "http://approver:4003";
 const AUTHORITY_URL = process.env.AUTHORITY_URL ?? "http://authority:4002";
@@ -45,15 +47,16 @@ async function exportBundle(invocationId) {
 }
 
 const run = `ev-${Date.now()}`;
+const session = await agentSession(AGENT_URL); // permit + purchases are scoped to this agent session
 mkdirSync(".evidence", { recursive: true });
 
 const identity = await (await fetch(`${AGENT_URL}/identity`)).json();
 const issued = await post(`${APPROVER_URL}/approvals`, { agent: identity.agent, operation: "summarize", datasetId: "dataset-a" }, { authorization: `Bearer ${APPROVER_CODE}` });
 if (issued.status !== 201) throw new Error(`approval failed: ${JSON.stringify(issued)}`);
-const installed = await post(`${AGENT_URL}/permit`, { permit: issued.json.permit });
+const installed = await post(`${AGENT_URL}/permit`, { permit: issued.json.permit }, session);
 if (installed.status !== 200) throw new Error(`install failed: ${JSON.stringify(installed)}`);
 
-const allow = await post(`${AGENT_URL}/demo`, { invocationId: `${run}-summarize-a`, operation: "summarize", datasetId: "dataset-a" });
+const allow = await post(`${AGENT_URL}/demo`, { invocationId: `${run}-summarize-a`, operation: "summarize", datasetId: "dataset-a" }, session);
 if (allow.json.authorization?.decision !== "ALLOW") {
   if (isExternalPaymentFailure({ http: allow.status, refusal: allow.json.authority?.reasonCode ?? null })) {
     // Blocked as RECONCILIATION_REQUIRED (or service unavailable); not retried.
@@ -62,7 +65,7 @@ if (allow.json.authorization?.decision !== "ALLOW") {
   }
   throw new Error(`purchase not allowed: ${JSON.stringify(allow.json)}`);
 }
-const deny = await post(`${AGENT_URL}/demo`, { invocationId: `${run}-export-a`, operation: "export", datasetId: "dataset-a" });
+const deny = await post(`${AGENT_URL}/demo`, { invocationId: `${run}-export-a`, operation: "export", datasetId: "dataset-a" }, session);
 if (deny.json.authorization?.decision !== "DENY") throw new Error(`export not denied: ${JSON.stringify(deny.json)}`);
 
 console.log(

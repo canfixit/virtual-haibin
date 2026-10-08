@@ -22,7 +22,7 @@ The page uses:
 
 | Service | URL | Purpose |
 |---|---|---|
-| agent | `http://localhost:4000` | `/identity`, `/permit`, `/demo`, `/evidence/:id` |
+| agent | `http://localhost:4000` | `/identity`, `/session`, then (session-scoped) `/permit`, `/demo`, `/evidence/:id` |
 | approver | `http://127.0.0.1:4003` | human approval, with the approval code |
 | verifier-api | `http://localhost:4004` | the standalone verifier |
 
@@ -39,6 +39,25 @@ Nothing on the page is simulated. A step without backing data is shown as *not r
 | How it works | orientation only: which stops the last request reached |
 | Verify evidence | bundle relayed by the agent from the authority's `/evidence/:id`, checked by `verifier-api` offline, or online, which also observes settlement on the sandbox RPC |
 | Technical details | raw permit, responses, bundle and report; extra adversarial tests (`summarize(dataset-b)`, merchant overcharge, wrong recipient, wrong asset) |
+
+### Demo API access control (Phase 6.1)
+
+Every agent route except `/health`, `/identity` and `POST /session` requires a demo **session capability**, sent as `Authorization: Bearer <token>`:
+
+- **Issuing tokens.** `POST /session` returns a server-generated token (256 random bits) exactly once. The agent keeps only its SHA-256 digest, never logs it, and the token is unrelated to the authority's bearer secret. The UI holds it in page memory and sends it only as a header, never in storage or URLs.
+- **Permit scope.** The permit is installed into the caller's session (`POST /permit`). Purchases (`POST /demo`) use only that session's permit, and other sessions cannot read it (`GET /permit`).
+- **Invocation IDs.** An ID is claimed by the first session to use it, *before* anything is contacted. Other sessions can never reuse it, even after the owning session has ended: retired IDs are not released.
+- **Evidence.** `GET /evidence/:id` relays only invocations where *this* session's own signed request received a decision from the authority. Unknown and foreign IDs get the same 404 and are refused before the authority is contacted.
+- **Audit.** Each session sees only its own audit entries.
+- **Limits.** Sessions expire after 60 minutes. At most 100 sessions are kept, with the oldest evicted first, and at most 200 invocations per session.
+
+Creating a new session grants nothing that belongs to existing sessions. A page reload starts a new session, so the human approves again.
+
+**Limits of this boundary (demo-grade):**
+- **Anyone who can reach the agent's port can create an (empty) session.** What protects spending is still the human approval code (to obtain a permit) and the authority's permit, agent-signature and payment enforcement. Sessions only stop one demo user from using another's permit, purchases or evidence.
+- **Session flooding is not prevented.** Creating many sessions can evict the oldest ones (denial of service, not access). Evicted sessions' invocations stay retired.
+- **State is lost on restart.** It is in memory, for one agent process; after an agent restart, users must start over.
+- **Binding the published ports to `127.0.0.1` is not isolation from other containers.** On Docker Desktop, containers can still reach host-published ports. These guarantees come from the session checks, not from network placement.
 
 ### Why relaying the evidence through the agent is safe
 

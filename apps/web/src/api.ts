@@ -23,6 +23,26 @@ async function json<T>(response: Response): Promise<T> {
   return body;
 }
 
+/**
+ * The demo session capability for the agent API, held in page memory only:
+ * never written to browser storage or cookies, never put in a URL,
+ * never logged, and sent only as an Authorization header to the agent.
+ */
+let sessionToken: string | null = null;
+
+/** Starts a new demo session; any permit or purchase of a previous session is not carried over. */
+export async function startSession(): Promise<void> {
+  const response = await fetch(`${agentApiUrl}/session`, { method: "POST" });
+  sessionToken = (await json<{ token: string }>(response)).token;
+}
+
+function agentAuth(): Record<string, string> {
+  if (sessionToken === null) {
+    throw new ApiError("No demo session. Reload the page to start one.", 401);
+  }
+  return { authorization: `Bearer ${sessionToken}` };
+}
+
 export type ApprovalTerms = {
   service: string;
   network: string;
@@ -54,15 +74,15 @@ export async function approve(agent: string, approvalCode: string, operation: st
 
 /** The agent receives only the signed permit. */
 export async function installPermit(permit: Permit): Promise<void> {
-  await json(await fetch(`${agentApiUrl}/permit`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ permit }) }));
+  await json(await fetch(`${agentApiUrl}/permit`, { method: "POST", headers: { "content-type": "application/json", ...agentAuth() }, body: JSON.stringify({ permit }) }));
 }
 
 /** Asks the agent to buy an operation. Refusals (4xx) are returned as data, not thrown. */
 export async function runOperation(body: { operation: string; datasetId: string; scenario?: string }): Promise<{ httpStatus: number; response: DemoResponse }> {
-  const response = await fetch(`${agentApiUrl}/demo`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const response = await fetch(`${agentApiUrl}/demo`, { method: "POST", headers: { "content-type": "application/json", ...agentAuth() }, body: JSON.stringify(body) });
   const payload = (await response.json().catch(() => ({}))) as DemoResponse & { error?: string };
 
-  if (response.status >= 500) {
+  if (response.status === 401 || response.status >= 500) {
     throw new ApiError(payload.error ?? `HTTP ${response.status}`, response.status);
   }
 
@@ -71,7 +91,7 @@ export async function runOperation(body: { operation: string; datasetId: string;
 
 /** Exported evidence bundle, relayed by the agent (raw text: verified by signatures, not by transport). */
 export async function getEvidence(invocationId: string): Promise<string> {
-  const response = await fetch(`${agentApiUrl}/evidence/${encodeURIComponent(invocationId)}`);
+  const response = await fetch(`${agentApiUrl}/evidence/${encodeURIComponent(invocationId)}`, { headers: agentAuth() });
 
   if (!response.ok) {
     throw new ApiError(`Evidence export failed (HTTP ${response.status})`, response.status);

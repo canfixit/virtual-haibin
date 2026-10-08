@@ -13,6 +13,8 @@
 
 import { isExternalPaymentFailure, Outcome } from "./lib/outcome.mjs";
 
+import { agentSession } from "./lib/agent-session.mjs";
+
 const AGENT_URL = process.env.AGENT_URL ?? "http://agent:4000";
 const AUTHORITY_URL = process.env.AUTHORITY_URL ?? "http://authority:4002";
 const APPROVER_URL = process.env.APPROVER_URL ?? "http://approver:4003";
@@ -32,7 +34,7 @@ const check = (name, condition, detail) => outcome.check(name, condition, detail
 async function demo(body) {
   const response = await fetch(`${AGENT_URL}/demo`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...session },
     body: JSON.stringify({ operation: "summarize", datasetId: "dataset-a", ...body }),
     signal: AbortSignal.timeout(90_000),
   });
@@ -71,6 +73,8 @@ async function reconcile() {
 }
 
 const run = `it-${Date.now()}`;
+// Permit, purchases and evidence are scoped to this agent session.
+const session = await agentSession(AGENT_URL);
 console.log(`Pay.sh Solana Payment Sandbox integration run ${run}`);
 
 // Human approval: the approver (not the agent) issues a permit for exactly
@@ -84,7 +88,7 @@ const issued = await postJson(
   { authorization: `Bearer ${APPROVER_CODE}` },
 );
 check("approver issues a permit for summarize(dataset-a)", issued.status === 201 && issued.json.permit?.operation?.operation === "summarize", issued);
-const installed = await postJson(`${AGENT_URL}/permit`, { permit: issued.json.permit });
+const installed = await postJson(`${AGENT_URL}/permit`, { permit: issued.json.permit }, session);
 check("agent installs the human-signed permit", installed.status === 200, installed);
 
 // Case 1: ALLOW -> real sandbox settlement + paid result.
