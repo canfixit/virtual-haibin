@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Virtual Haibin — Human-authorized spending for AI agents on Solana</title>
+  <desc id="desc">Same payment, different operation, different decision: summarize(dataset-a) is authorized and paid; export(dataset-a) at the same price is blocked with no payment.</desc>
+  <!--
+    Editable banner. CanFixIT tokens from apps/web/src/theme.css:
+      blue #2563eb (human approval), red #dc2626 (blocked), purple #9333ea (Virtual Haibin / evidence).
+    All text is live SVG text; edit in any text editor or Inkscape/Figma.
+  -->
+  <style>
+    .bg { fill: #111827; }
+    .panel { fill: #1f2937; stroke: #374151; stroke-width: 2; }
+    .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .kicker { fill: #c084fc; font-size: 18px; letter-spacing: 3px; }
+    .title { fill: #f9fafb; font-size: 58px; font-weight: 600; letter-spacing: -1px; }
+    .lede { fill: #9ca3af; font-size: 24px; }
+    .muted { fill: #9ca3af; font-size: 30px; }
+    .word { fill: #f9fafb; font-size: 30px; }
+    .red-on-dark { fill: #f87171; font-size: 30px; }
+    .purple-on-dark { fill: #c084fc; font-size: 30px; }
+    .op { fill: #f9fafb; font-size: 24px; }
+    .badge-text { fill: #ffffff; font-size: 18px; font-weight: 700; letter-spacing: 1.5px; }
+    .note { fill: #9ca3af; font-size: 18px; }
+    .foot { fill: #6b7280; font-size: 16px; letter-spacing: 1px; }
+  </style>
+  <rect class="bg" width="1200" height="630"/>
+  <rect x="0" y="0" width="400" height="6" fill="#2563eb"/>
+  <rect x="400" y="0" width="400" height="6" fill="#dc2626"/>
+  <rect x="800" y="0" width="400" height="6" fill="#9333ea"/>
+
+  <text class="sans kicker" x="72" y="92">CANFIXIT · VIRTUAL HAIBIN</text>
+  <text class="sans title" x="72" y="168">Human-authorized spending</text>
+  <text class="sans title" x="72" y="236">for AI agents on Solana</text>
+  <text class="sans lede" x="72" y="290">A person approves one exact API operation. The agent can pay for that — and nothing else.</text>
+
+  <!-- the core comparison -->
+  <rect class="panel" x="72" y="336" width="500" height="200" rx="16"/>
+  <text class="sans muted" x="104" y="398">Same</text>
+  <text class="sans word" x="264" y="398">payment.</text>
+  <text class="sans red-on-dark" x="104" y="448">Different</text>
+  <text class="sans word" x="264" y="448">operation.</text>
+  <text class="sans purple-on-dark" x="104" y="498">Different</text>
+  <text class="sans word" x="264" y="498">decision.</text>
+
+  <rect class="panel" x="604" y="336" width="524" height="92" rx="16"/>
+  <text class="mono op" x="636" y="390">summarize(dataset-a)</text>
+  <rect x="934" y="362" width="170" height="40" rx="8" fill="#9333ea"/>
+  <text class="sans badge-text" x="1019" y="389" text-anchor="middle">AUTHORIZED</text>
+
+  <rect class="panel" x="604" y="444" width="524" height="92" rx="16"/>
+  <text class="mono op" x="636" y="498">export(dataset-a)</text>
+  <rect x="934" y="470" width="170" height="40" rx="8" fill="#dc2626"/>
+  <text class="sans badge-text" x="1019" y="497" text-anchor="middle">BLOCKED</text>
+
+  <text class="sans note" x="604" y="566">Same merchant, endpoint, recipient, token and price.</text>
+  <text class="sans foot" x="72" y="596">x402 on the Pay.sh Solana Payment Sandbox · no real funds · open source (Apache-2.0)</text>
+</svg>

@@ -152,6 +152,8 @@ credentials/
 *.key
 *.p12
 *.pfx
+# Human approval code (normally only in the approver's Docker volume)
+approval-code
 
 # Solana wallets / local keypairs
 wallet.json

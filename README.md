@@ -1,404 +1,226 @@
 # Virtual Haibin
 
-**Verifiable spending permissions for AI agents.**
+**Human-authorized spending for AI agents on Solana.**
 
-Virtual Haibin is a developer-infrastructure project exploring how a human-approved paid service request can be bound to the exact Solana payment an autonomous agent is allowed to make, enforced at the signing boundary, and recorded as independently checkable evidence.
+A person approves one exact API operation. The AI agent can pay for that operation with x402 on Solana, and nothing else. Every purchase leaves evidence anyone can verify.
 
-The longer-term thesis remains broader: **verifiable authority for autonomous agents**.
+> **Same payment. Different operation. Different decision.**
 
-The immediate goal is a focused MVP for the **Colosseum / Superteam Crypto World's Fair 2026**.
+Built by [CanFixIT](https://www.canfixit.com.au) for the Colosseum Crypto World's Fair 2026. Runs on the **Pay.sh Solana Payment Sandbox**, so no real funds are used. Open source under Apache-2.0.
 
-## Hackathon thesis
+![Same payment, different operation](docs/submission/assets/screenshots/04-comparison.png)
 
-AI agents can increasingly call tools, interact with external services, and control wallets. But a valid agent identity or wallet does not prove that every payment the agent attempts is authorized.
+## The problem
 
-For the hackathon, Virtual Haibin focuses on one concrete question:
+AI agents can now pay for APIs in one HTTP round trip with x402 on Solana. Wallet policies can limit *how much* an agent spends and *whom* it pays. But the payment doesn't say *what is being bought*. On one endpoint, at one price, to one recipient, "summarize this dataset" and "export this dataset" are the same transaction. A spending limit allows both.
 
-> Can a developer give an agent a narrow paid-service permission — this service, this capability, this recipient, this mint, this budget, this expiry — and enforce it at the signer so that the agent cannot silently widen it?
+## The demo
 
-The target integration is:
-
-```text
-human permission
-      ->
-exact service/API request
-      ->
-signer enforcement
-      ->
-exact Solana settlement
-      ->
-independently checkable evidence
-```
-
-The project is deliberately **not** claiming that agent identity, delegation, spending limits, policy engines, delegated signing, or audit logs are new concepts.
-
-## Crypto World's Fair 2026
-
-The current competition strategy is approximately:
-
-- **95%** focused on one working, validated hackathon workflow
-- **5%** reusable architecture strictly required by that workflow
-
-The previous broader platform-first allocation has been retired for the competition phase.
-
-See:
-
-- [Hackathon Product Decision — 22 September 2026](docs/hackathon-decision-2026-09-22.md)
-- [Current MVP plan](docs/mvp-plan.md)
-- [World's Fair strategy](docs/strategy.md)
-
-## Target MVP
-
-A human signs a bounded purchase permit.
-
-Example:
+The agent, merchant, endpoint, recipient, token, price and environment are the same in both runs:
 
 ```text
-Agent: Virtual Haibin
-Service: Research Agent
-Capability: research.summary
-Recipient: <configured Solana recipient>
-Network: solana-payment-sandbox (Pay.sh Solana Payment Sandbox)
-Mint: <configured sandbox token mint>
-Maximum per call: 0.02
-Total budget: 0.05
-Expiry: 30 minutes
+summarize(dataset-a)  →  AUTHORIZED  →  PAID (sandbox)  →  RESULT VERIFIED
+export(dataset-a)     →  BLOCKED     →  NO PAYMENT
 ```
 
-The autonomous agent does **not** hold an unrestricted signing key.
+The human approved `summarize(dataset-a)`. The export is refused with `OPERATION_NOT_AUTHORIZED` before any reservation, merchant contact, signature or payment.
 
-Instead:
+## What it does
 
-```text
-Human
-  |
-  | signs PurchasePermit
-  v
-Virtual Haibin Agent
-  |
-  | typed PurchaseRequest
-  v
-Authority / Signer Service
-  |
-  +-- verify permit signature
-  +-- authenticate agent
-  +-- verify service/capability
-  +-- verify recipient/mint/network
-  +-- enforce expiry
-  +-- reserve budget atomically
-  +-- prevent replay
-  |
-  v
-Solana settlement
-  |
-  v
-External service
-  |
-  v
-Evidence receipt
-```
+1. **Human approval.** A separate approver, the only holder of the issuer key, signs a **PurchasePermit**. It binds the agent, service, method, endpoint, operation and argument, network profile, mint, recipient, per-call and total budget, and expiry.
+2. **The agent has no wallet.** It holds only an identity key and signs typed purchase requests.
+3. **The authority enforces at the signer.** It verifies the permit, the trusted issuer, the agent's signature and the exact operation. It reserves budget atomically, prevents replay, and checks the merchant's real x402 challenge against the permit. Then it builds and signs the payment itself.
+4. **The merchant checks before settlement.** The paid API refuses a paid request unless it carries the authority's signed authorization for exactly that request and price. It then signs an acknowledgement.
+5. **Evidence.** Every decision exports a signed bundle. A standalone verifier with pinned public keys checks it, including when Virtual Haibin is offline.
 
-## Required demo cases
+### How it relates to existing tools
 
-The hackathon demo should prove more than a simple wallet spending cap.
+Virtual Haibin is not a new protocol or primitive, and other systems can also express semantic policies. It is a focused integration for Solana paid APIs: human approval of the exact API operation → authenticated agent request → enforced x402 payment, which the merchant checks before settlement → independently checkable evidence.
 
-### ALLOW
+- **[x402](https://www.x402.org/)** and **Solana Pay Kit** define how an agent pays a paid API. Virtual Haibin uses both unchanged and adds the decision about whether a human authorized *this* purchase.
+- **Wallet policy engines** such as [Privy](https://docs.privy.io/controls/policies/overview) and [Turnkey](https://docs.turnkey.com/concepts/policies/overview) enforce transaction facts: amounts, recipients, programs and SPL transfer fields. Virtual Haibin checks the same facts, and also binds the API operation that the transaction itself does not encode. A policy-engine wallet could act as its signer.
+- **[AP2](https://ap2-protocol.org/)** (Agent Payments Protocol) uses signed mandates as proof of user intent, with a current focus on card payments. Virtual Haibin applies a similar idea to per-operation x402 purchases on Solana. It could adopt AP2 mandate formats rather than compete with them.
 
-```text
-0.01 -> authorized service -> authorized recipient
-ALLOW
-```
+## Screenshots
 
-### DENY — overspend
+| Human approval | Authorized | Blocked | Evidence |
+|---|---|---|---|
+| ![approval](docs/submission/assets/screenshots/01b-permit-issued.png) | ![authorized](docs/submission/assets/screenshots/02-authorized.png) | ![blocked](docs/submission/assets/screenshots/03-blocked-export.png) | ![evidence](docs/submission/assets/screenshots/05-evidence-verified-offline.png) |
 
-```text
-0.10 -> authorized recipient
-DENY: exceeds per-call limit
-```
+These are real captures from the running stack at commit `ea07eb0` on 2026-10-08, taken with headless Chromium. The approval code was never entered into a visible field. The authorized purchase shown is Pay.sh Solana Payment Sandbox transaction `5MjqNhFrzj2ZtabuhzGD7fBCwLHyZPmXEL42bumMuRBK9i46984f3X6Tf8FgdQUHmNLgngkAQfzTKK9LWa7RFQH3`. More screenshots are in [docs/submission/assets/screenshots/](docs/submission/assets/screenshots/).
 
-### DENY — semantic mismatch
+## Run it (Docker only)
 
-```text
-0.01 -> wrong recipient or unauthorized service
-DENY: not authorized by the permit
-```
-
-This is strategically important: the payment is affordable, but still unauthorized.
-
-### REPLAY
-
-Replaying the successful invocation must not create a second payment.
-
-### SHARED BUDGET
-
-Sequential or concurrent requests must not exceed the total delegated budget.
-
-## Current implementation status
-
-The repository contains an end-to-end vertical slice in which an agent's purchase is authorized by Virtual Haibin and settled with a real x402 payment on the **Pay.sh Solana Payment Sandbox** (a hosted Surfpool test validator; no real funds):
-
-```text
-Human (web UI + approval code)
-  -> Approver (separate process; the only holder of the issuer key)
-       signs a PurchasePermit v2 for one exact operation, e.g. summarize(dataset-a)
-  -> the signed permit is installed in the agent (the agent cannot create or widen one)
-React UI
-  -> Virtual Haibin agent (signs a typed purchase request, incl. the operation, with a non-spending identity key)
-  -> Authority service
-       verifies the signed permit, that its issuer is the pinned trusted issuer, and the agent's request signature
-       checks the requested operation against the human-approved one (exact match)
-       builds the outbound HTTP request from the verified operation
-       fetches the paid service's real HTTP 402 x402 challenge for exactly that request (trusted URL only)
-       validates the challenge against the settlement profile, the request and the permit
-       reserves budget atomically in SQLite
-       signs the x402 "exact" payment with its own payment wallet
-  -> paid mock service (Pay Kit x402 gate; its facilitator settles on the sandbox)
-  -> authority confirms settlement on the pinned sandbox RPC, stores evidence, returns the paid result
-```
-
-**Who does what.** Pay.sh / Solana Pay Kit (`@solana/pay-kit` on the service, `@x402/core` + `@x402/svm` on the authority) provide the payment protocol and settlement rail: the x402 v2 402 challenge, the `exact` SPL transfer, the facilitator that verifies and submits it. Virtual Haibin provides delegated authority on top of that rail: the human-signed PurchasePermit and issuer entitlement, agent authentication, semantic policy (exact operation and arguments, service, capability, recipient, asset, amount), durable budget, replay/conflict protection and reconciliation. Virtual Haibin did not invent x402 and does not re-implement it. See [docs/payments-x402-sandbox.md](docs/payments-x402-sandbox.md) for the trust model.
-
-**Phase 4.5: same payment, different meaning.** The paid service has one endpoint, `POST /api/v1/report`, where `summarize` and `export` cost exactly the same (same price, payTo, asset, network). The human approves `summarize(dataset-a)`. A fresh request for `export(dataset-a)` is denied with `OPERATION_NOT_AUTHORIZED`, and `summarize(dataset-b)` with `OPERATION_ARGUMENT_NOT_AUTHORIZED`. Neither is reserved, contacts the service or signs a payment. A permit signed by any key other than the pinned issuer is refused with `ISSUER_NOT_ENTITLED`. A valid payment does not necessarily mean the agent was authorized to buy that operation. See [docs/human-approval-and-semantic-authorization.md](docs/human-approval-and-semantic-authorization.md).
-
-**Judge-facing UI (Phase 6).** `http://localhost:5173` is a single page in the CanFixIT visual language. Blue marks human approval, red marks the attempted violation, and purple marks Virtual Haibin and verification. It walks through:
-
-1. human approval
-2. the approved `summarize(dataset-a)` against the unauthorized `export(dataset-a)`
-3. the real purchase timeline
-4. a side-by-side comparison showing that only the operation differs
-5. the standalone verifier's report on the exported evidence
-
-Everything shown comes from real backend responses. The verifier runs as `verifier-api` on port 4004: the standalone verifier library, isolated on its own network with pinned public trust keys. Brand colours are three CSS variables in `apps/web/src/theme.css`. Agent API calls are scoped to a per-page demo session capability, so one visitor cannot use another's permit, purchases or evidence. See [docs/judge-demo-ui.md](docs/judge-demo-ui.md).
-
-The current UI exposes:
-
-- human approval of `summarize(dataset-a)` (requires the approval code from `docker compose exec approver cat /keys/approval-code`)
-- the approved operation: 0.01 sandbox USDC (`"10000"` base units) settled on the sandbox, returning the paid result
-- an unauthorized `export(dataset-a)` and `summarize(dataset-b)` at the same price: denied, nothing reserved or signed
-- a merchant that overcharges in its real 402 (challenge asks `"100000"`): denied, nothing signed
-- a merchant whose 402 redirects payment to another address: denied (`RECIPIENT_MISMATCH`), nothing signed
-- a merchant whose 402 asks for a different asset (sandbox USDT): denied (`ASSET_NOT_ALLOWED`, `MINT_MISMATCH`), nothing signed
-
-Reusing an `invocationId` with the same request returns the stored result with no second payment and no second contact with the service; reusing it with a different request returns HTTP 409 `INVOCATION_CONFLICT` with no payment and no budget change.
-
-All money is integer base units as canonical decimal strings end to end; decimals are never assumed (the mint's decimals come from chain via the pinned RPC). The full JSON (receipt, payment evidence, paid result) is in the UI's raw output panel; a judge-facing view comes in Phase 7.
-
-Current limitations and remaining boundaries:
-
-- **sandbox only** -- the only settlement profile is `solana-payment-sandbox`. Its challenges advertise mainnet's CAIP-2 id and the mainnet USDC mint address (the sandbox clones mainnet), so the challenge alone cannot prove the settlement environment; the guarantee comes from the authority-pinned sandbox RPC and authority-fetched sandbox blockhash (see the doc above). No public devnet or mainnet path exists.
-- **sandbox USDC** is the mainnet USDC mint address as cloned into the sandbox; it has no real value and wallets are funded with Surfnet cheatcodes
-- durable state is single-node SQLite (`/data/authority.db` on the `authority_data` volume) behind an `AuthorityStore` interface; no replication/backup, and startup recovery assumes a single authority process
-- the authority's receipt/evidence signing key is persistent (authority-only volume) and pinned by verifiers; the payment wallet is still ephemeral per process (reconciliation needs only the stored payer signature, not the key), so the payer's identity in evidence is authority-attested
-- the paid service only receives payment through Pay Kit's own x402 verification; it does not yet verify Virtual Haibin's authorization evidence (Phase 5)
-- portable evidence: `GET /evidence/<invocationId>` exports an authority-signed EvidenceBundleV1 that a standalone verifier checks with the authority stopped. Offline it verifies signatures, digests and static policy; with `--online` it also observes settlement on the sandbox RPC. It reports what is only authority-attested (budget totals, offline settlement, result observation) and what no bundle can prove. See [docs/evidence-and-verification.md](docs/evidence-and-verification.md)
-- service-side verification (Phase 5C): the paid service refuses any paid request lacking a valid authority-signed `x-vh-authorization` for exactly that request and price, before its x402 gate settles. It signs a `ServiceAcknowledgementV1` (operation performed, payment transaction, result digest) with its own persistent key. With `--service-trust` the verifier reports the service's statement as SERVICE_ATTESTED; result correctness stays not provable
-- agent identity is ephemeral: the agent generates a fresh non-extractable Ed25519 *identity* key at startup (it signs authorization requests and can never spend funds); after an agent restart the human must approve a new permit for the new identity
-- the human approval boundary is demo-grade: the issuer key is a seed file in the approver's private Docker volume, and approval is gated by a 128-bit approval code the human reads from that volume -- not a wallet, HSM or IAM system. The approver's own network and loopback-only port are defense in depth only; on Docker Desktop other containers can reach the port via `host.docker.internal`, which is why the approval code is required
-- one exact operation schema (`summarize`/`export` by `datasetId`) with exact-match comparison; no policy language
-- agent-to-authority transport authentication is a dev-only shared bearer secret (`AUTHORITY_SHARED_SECRET` in the gitignored `.env`); it is never treated as proof of agent identity -- the agent's request signature is
-- an invocation whose payment outcome is unknown is durably `RECONCILIATION_REQUIRED` (HTTP 409) with its budget reserved; reconciliation resolves it read-only against the sandbox (landed -> `CONFIRMED`; not landed and blockhash expired -> `FAILED`, reservation released). An invocation interrupted before its payment attempt was recorded was provably never transmitted (the attempt is durably committed before the credential can leave the authority), so startup recovery releases it as `FAILED`.
-
-**CI.** `.github/workflows/ci.yml` is the required correctness gate. It runs a frozen install, every unit/security/persistence/payment-protocol/evidence test using local fakes, and typecheck/build inside the project image, with no external network.
-
-The live Pay.sh sandbox integration lives in a **separate** workflow, `.github/workflows/sandbox-integration.yml`. It runs manually or on a daily schedule and is never a merge gate, because it depends on third-party availability. It runs `scripts/sandbox-integration.mjs`, `scripts/semantic-demo.mjs` and `scripts/evidence-demo.sh` after a sandbox-availability preflight. Each step's failure is classified, never hidden:
-
-- **Integration regression** (exit 1): a product assertion failed.
-- **External sandbox/environment failure** (exit 3): the sandbox, its RPC or the paid service's facilitator failed, or an externally submitted payment ended `RECONCILIATION_REQUIRED`. The authority correctly keeps it blocked, and neither the product nor the tests retry it.
-
-Checks that depend on such a payment are reported as skipped, and the run still fails.
-
-To rerun the external integration:
-
-- **On GitHub:** Actions → "Sandbox integration (external)" → Run workflow.
-- **Locally** (stack up):
-
-  ```bash
-  code="$(docker compose exec -T approver cat /keys/approval-code)"
-  docker compose run --rm -T -e APPROVER_CODE="$code" demo-driver node scripts/sandbox-integration.mjs
-  docker compose run --rm -T -e APPROVER_CODE="$code" demo-driver node scripts/semantic-demo.mjs
-  ./scripts/evidence-demo.sh
-  ```
-
-A repeated external classification across reruns while the sandbox itself looks healthy deserves investigation as a possible regression.
-
-## Core architecture
-
-```text
-apps/
-  web/             # User-facing dashboard
-  agent/           # Autonomous agent runtime (no signing key, no issuer key)
-  approver/        # Human-approval boundary (only holder of the permit-issuer key)
-  verifier/        # Standalone evidence verifier CLI (no authority, no network offline)
-  authority/        # Protected signer/enforcement boundary
-  service-agent/   # Demo / integration service
-
-packages/
-  identity/        # Agent and issuer identity models
-  mandate/         # Signed PurchasePermit representation, validation, Ed25519 signing/verification
-  policy/          # Deterministic authorization decisions
-  payments/        # Solana/payment abstractions
-  audit/           # Action/evidence event models
-  evidence/        # EvidenceBundleV1, signed manifest, strict parser, verifier library
-```
-
-## Engineering priorities
-
-Current order:
-
-```text
-signed purchase permit
-        ->
-protected signer / enforcement boundary
-        ->
-durable budget + replay/idempotency
-        ->
-real Solana settlement (x402 on the Pay.sh Solana Payment Sandbox)
-        ->
-service-side verification
-        ->
-evidence receipt + independent verifier
-        ->
-judge-facing UX
-        ->
-external developer validation
-```
-
-A custom Solana program is not a prerequisite. Existing Solana/payment primitives should be reused where they safely meet the required enforcement properties.
-
-## Docker-first development
-
-The default development workflow keeps WSL clean. **Node.js, pnpm, JavaScript dependencies, TypeScript tooling, Vite, and all application processes run inside Docker.**
-
-Host requirement:
-
-- Docker / Docker Desktop with WSL integration
-
-You do **not** need to install Node.js, pnpm, npm packages, or Git into WSL.
-
-### Clone without host Git
-
-Because this repository is public, use a temporary Git container:
+You only need Docker. Do not install Node.js, pnpm, Git or the Solana CLI on the host. The full guide with troubleshooting is the **[judge quickstart](docs/submission/judge-quickstart.md)**.
 
 ```bash
-mkdir -p ~/Projects
-cd ~/Projects
-
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  -v "$PWD:/work" \
-  -w /work \
-  alpine/git \
-  clone https://github.com/canfixit/virtual-haibin.git
-
+# 1. clone (no host Git needed)
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+  alpine/git clone https://github.com/canfixit/virtual-haibin.git
 cd virtual-haibin
-```
 
-### Create the local secrets file
-
-Compose requires `AUTHORITY_SHARED_SECRET` (a dev-only agent -> authority bearer token) and will refuse to start without it. Create the gitignored `.env` once:
-
-```bash
+# 2. local dev secret (gitignored)
 cp .env.example .env
 sed -i "s|^AUTHORITY_SHARED_SECRET=.*|AUTHORITY_SHARED_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '/+=')|" .env
+
+# 3. start
+docker compose up --build -d --wait
+
+# 4. the human's approval code (paste it into the UI)
+docker compose exec approver cat /keys/approval-code
 ```
 
-Never commit `.env`. The authority refuses to start with the `.env.example` placeholder or a secret shorter than 32 characters.
+Open **http://localhost:5173**:
 
-### Start the complete development stack
+1. Approve.
+2. Click **Run approved operation**.
+3. Click **Try unauthorized export**.
+4. Verify the evidence.
 
-```bash
-docker compose up --build
+The stack needs outbound access to the hosted sandbox (`402.surfnet.dev`). The first image build can take a long time, depending on the npm registry.
+
+Stop with `docker compose down`. `docker compose down -v` also deletes every key and all SQLite state. See [Docker-first development](docs/docker-development.md).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    H["Human<br/>approves summarize(dataset-a)"]:::blue
+    A["AI agent<br/>no wallet · no signing key"]:::neutral
+    VH{"Virtual Haibin authority<br/>exact operation approved?"}:::purple
+    S["Paid API<br/>checks authorization<br/>before settling"]:::neutral
+    SOL[("Solana Payment Sandbox<br/>x402 settlement")]:::neutral
+    E["Signed evidence<br/>separate verifier"]:::purple
+    X["BLOCKED<br/>no payment"]:::red
+    H -- "signed permit" --> A
+    A -- "summarize" --> VH
+    A -. "export, same price" .-> VH
+    VH -- "yes" --> S --> SOL --> E
+    VH -. "no" .-> X
+    classDef blue fill:#2563eb,stroke:#1e40af,color:#ffffff
+    classDef red fill:#dc2626,stroke:#991b1b,color:#ffffff
+    classDef purple fill:#9333ea,stroke:#6b21a8,color:#ffffff
+    classDef neutral fill:#f9fafb,stroke:#6b7280,color:#111827
 ```
 
-This starts:
-
-- web UI: `http://localhost:5173`
-- Virtual Haibin agent: `http://localhost:4000`
-- authority (protected signer): `http://localhost:4002`
-- mock service agent: `http://localhost:4001`
-- approver (human-approval boundary; host loopback only): `http://127.0.0.1:4003`
-
-Open:
+The detailed sequence, key custody and network layout are in [docs/submission/architecture.md](docs/submission/architecture.md).
 
 ```text
-http://localhost:5173
+apps/      web · agent (identity key only) · approver (issuer key) · authority (signer, SQLite)
+           service-agent (mock paid API, Pay Kit) · verifier (CLI + verifier-api)
+packages/  mandate (PurchasePermit) · policy · payments (x402, settlement profile)
+           evidence (bundle + verifier library) · identity · audit
 ```
 
-All `node_modules` directories are Docker-managed named volumes, so project dependencies are not written into the WSL project tree.
+## x402 and the Solana Payment Sandbox
 
-### Stop
+Payments use **x402 v2 `exact`** (`@x402/core`, `@x402/svm`). The merchant uses **Solana Pay Kit** (`@solana/pay-kit`) and its facilitator. Settlement runs on the **Pay.sh Solana Payment Sandbox**, a hosted Surfpool validator that clones mainnet. Amounts are integer base units; the demo price is 10,000 units, or 0.01 sandbox USDC.
+
+The sandbox reuses mainnet's chain id and USDC mint address. Because of that, the authority pins the sandbox RPC and refuses non-Surfnet blockhashes, and environment claims never rest on the x402 challenge alone. This is **not** mainnet or devnet.
+
+Virtual Haibin did not invent x402 and does not re-implement it. Details: [docs/payments-x402-sandbox.md](docs/payments-x402-sandbox.md) and [human approval and semantic authorization](docs/human-approval-and-semantic-authorization.md).
+
+## Evidence and the verifier
+
+Each decision exports an authority-signed **EvidenceBundleV2**. It contains the permit, the agent request, the decision, the x402 challenge and payment, the service authorization and acknowledgement, and the result digest.
+
+The standalone verifier pins the issuer, authority and service public keys from its own configuration, never from the bundle:
+
+- **Offline mode** has no network at all. It checks every signature, digest, and permit ⊇ request ⊇ payment relation.
+- **Online mode** also observes the transaction on the sandbox RPC.
+
+Each claim is reported as VERIFIED, AUTHORITY_ATTESTED, SERVICE_ATTESTED, NOT_PROVABLE_FROM_BUNDLE or another status.
 
 ```bash
-docker compose down
+./scripts/evidence-demo.sh   # buy, export, STOP the authority, verify offline, tamper → INVALID, verify online
 ```
 
-To remove dependency volumes as well:
+Details: [docs/evidence-and-verification.md](docs/evidence-and-verification.md).
+
+## Security and trust
+
+- The agent cannot pay. The authority builds and signs every transaction, and never signs agent-supplied bytes.
+- Permits are Ed25519 over RFC 8785 canonical JSON, domain-separated and versioned. Changing any field breaks the signature.
+- Only the pinned issuer can grant spending. Money is integer atomic units throughout.
+- Budget and replay state live in SQLite, with atomic reservations and unique invocations. State survives restarts.
+- A timeout after transmission becomes `RECONCILIATION_REQUIRED`, which is **never automatically retried**.
+- No custom cryptography: Ed25519 via the official `@solana/*` libraries.
+
+This is a **hackathon prototype**: not audited, not production-ready, sandbox only. Read **[security and limitations](docs/submission/security-and-limitations.md)**.
+
+Never commit `.env`, approval codes, seeds, wallet keys, `*.db` or `.evidence/`. `.gitignore` covers them.
+
+## Testing
+
+There are 362 deterministic tests. They cover permit tampering, policy, budget and replay concurrency, restart persistence, the x402 protocol, reconciliation, evidence tampering, HTTP input limits and the UI model. All use local fakes and need no network:
 
 ```bash
-docker compose down -v
+docker compose run --rm -T --no-deps agent sh -euc '
+  for p in identity mandate policy payments authority approver agent evidence verifier service-agent web; do
+    pnpm --filter @virtual-haibin/$p test
+  done
+  pnpm check'
 ```
 
-`down -v` also deletes the `authority_data` volume, i.e. **all durable authority state** (budgets, invocation history, receipts), the `approver_keys` / `issuer_trust` volumes (the issuer key and approval code; a new issuer is created on next start), the `authority_trust` volume (the authority's receipt key itself lives in `authority_data`, so a new authority key is created too; keep the old public key if you still need to verify old bundles), and the `service_keys` / `service_trust` volumes (a new paid-service key). Use plain `docker compose down` to keep them.
+- **[`.github/workflows/ci.yml`](.github/workflows/ci.yml)** runs this. It is the required correctness gate.
+- **[`.github/workflows/sandbox-integration.yml`](.github/workflows/sandbox-integration.yml)** runs the live-sandbox scripts (`sandbox-integration.mjs`, `semantic-demo.mjs`, `evidence-demo.sh`) manually or daily. It is never a merge gate.
 
-### Validate inside Docker
+Its failures are classified as **integration regression** (exit 1) or **external sandbox failure** (exit 3), and are never hidden or retried.
 
-```bash
-docker compose run --rm agent pnpm check
-```
+## Limitations
 
-See [Docker-first development](docs/docker-development.md) for cloning, Git operations, dependency updates, logs, and isolation details.
+- **Sandbox only.** There is one settlement profile, and no devnet or mainnet path.
+- **Single parties.**
+  - one issuer, one authority and one merchant
+  - pinned public keys with no rotation or revocation
+  - demo-grade key custody (seed files in Docker volumes plus an approval code)
+- **Ephemeral keys.** The payment wallet and agent identity are generated per process.
+- **Single-node SQLite**, and the sandbox RPC is trusted to report chain state honestly.
+- **Narrow, off-chain semantics.** There is one operation schema with exact matching and no policy language. Semantic enforcement happens off-chain, in the authority and the merchant.
+- **The hosted sandbox can time out.** When it does, the purchase becomes `RECONCILIATION_REQUIRED`, which is correct and safe.
+- **Evidence has limits.** It does not prove that the human understood the permit, that the data is correct, or the global budget history.
 
-## Design principles
+The full list is in [security-and-limitations.md](docs/submission/security-and-limitations.md).
 
-1. **Permission is not identity** — a valid agent identity does not imply authority for a particular purchase.
-2. **Enforce at execution** — policy must be enforced at the signing/payment boundary, not merely checked earlier in the agent workflow.
-3. **Bind semantics to settlement** — service, capability, recipient, mint, amount, network, and invocation identity must not drift between authorization and signing.
-4. **Bounded autonomy** — agents receive explicit, constrained authority rather than unrestricted keys.
-5. **Replay and concurrency matter** — total budgets require durable, atomic state and idempotency.
-6. **Evidence has limits** — receipts should state what they prove and what remains trusted offchain.
-7. **Reuse existing infrastructure** — do not rebuild wallet, identity, or payment primitives without a demonstrated reason.
-8. **One workflow first** — validate a real developer problem before expanding the platform.
+## Roadmap
 
-## Longer-term direction
+These are directions, not commitments:
 
-Virtual Haibin's broader research direction still includes:
+1. One real external x402 paid-API integration.
+2. Validation interviews with agent developers and x402 merchants (not yet done).
+3. Package a library: permit, merchant middleware and verifier.
+4. Wallet- or HSM-backed issuer and signer custody; key rotation.
+5. Persistent agent identity; a richer but still auditable operation schema.
+6. Devnet, then mainnet, settlement profiles, only after review.
 
-- agent-to-agent interaction
-- identity and delegated authority
-- autonomous payments
-- secure tool execution
-- machine-to-machine trust
-- IAM integration
-- robotics / physical AI
-- policy and precedence between autonomous actors
+Explicitly out of scope for now: generic identity registries, reputation, marketplaces, multi-chain support, custom on-chain programs. See [strategy](docs/strategy.md).
 
-Those areas are deliberately outside the current hackathon critical path.
+## Hackathon history
 
-## Project documents
+All code was written during the Colosseum Crypto World's Fair 2026 contest period. The first commit is dated 2026-09-17.
 
-- [Hackathon Product Decision — 22 September 2026](docs/hackathon-decision-2026-09-22.md)
-- [Current MVP plan](docs/mvp-plan.md)
-- [World's Fair strategy](docs/strategy.md)
-- [Claude Code engineering instructions](CLAUDE.md)
-- [Claude Code Phase 1 handoff](docs/claude-handoff.md)
-- [Docker-first development](docs/docker-development.md)
-- [x402 settlement on the Pay.sh Solana Payment Sandbox](docs/payments-x402-sandbox.md)
-- [Human approval boundary and semantic operation authorization](docs/human-approval-and-semantic-authorization.md)
-- [Portable evidence and the standalone verifier](docs/evidence-and-verification.md)
+- **Narrowed scope.** The product was narrowed on 2026-09-22 after Superteam AU office-hour feedback and a Colosseum Copilot review ([decision](docs/hackathon-decision-2026-09-22.md)).
+- **Phases.** Phases 1–6.1 ran from 30 Sep to 8 Oct: permit → authority → durable state → x402 settlement → semantic authorization → evidence → merchant verification → UI.
+- **Detail.** The Git history is the authoritative timeline. Each phase is one commit.
 
-## Security
+Submission materials are in [docs/submission/](docs/submission/):
 
-This is a public repository. Never commit:
+- [architecture](docs/submission/architecture.md)
+- [judge quickstart](docs/submission/judge-quickstart.md)
+- [security and limitations](docs/submission/security-and-limitations.md)
+- [graphics and screenshots](docs/submission/assets/)
 
-- wallet private keys or seed phrases
-- Solana keypair files
-- API keys or tokens
-- production credentials
-- private user or agent data
-- environment files containing secrets
+## Videos
 
-Use dedicated development wallets and local environment variables for sensitive configuration.
+- Pitch video: *not yet published*
+- Technical demo video: *not yet published*
+
+## More documentation
+
+- [MVP plan](docs/mvp-plan.md) · [Strategy](docs/strategy.md) · [Hackathon decision](docs/hackathon-decision-2026-09-22.md)
+- [Judge-facing UI](docs/judge-demo-ui.md) · [Docker-first development](docs/docker-development.md)
+- [Engineering instructions (CLAUDE.md)](CLAUDE.md) · [Phase 1 handoff](docs/claude-handoff.md)
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE)

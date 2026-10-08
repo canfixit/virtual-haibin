@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Virtual Haibin by CanFixIT</title>
+  <desc id="desc">Three linked checkpoints: human approval (blue), blocked violation (red), verified evidence (purple).</desc>
+  <!--
+    Editable brand mark. Colours are the CanFixIT tokens from apps/web/src/theme.css:
+      blue   #2563eb  human approval / permitted scope
+      red    #dc2626  attempted violation / blocked
+      purple #9333ea  Virtual Haibin / verification / evidence
+    Change the three values in <style> to re-brand.
+  -->
+  <style>
+    .bg { fill: #111827; }
+    .blue { fill: #2563eb; }
+    .red { fill: #dc2626; }
+    .purple { fill: #9333ea; }
+    .line { stroke: #374151; stroke-width: 10; stroke-linecap: round; fill: none; }
+    .glyph { stroke: #ffffff; stroke-width: 16; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+    .word { fill: #f9fafb; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 44px; font-weight: 600; letter-spacing: -0.5px; }
+    .sub { fill: #c084fc; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 22px; letter-spacing: 3px; }
+  </style>
+  <rect class="bg" width="512" height="512" rx="64"/>
+
+  <!-- connector: approval -> (blocked branch) -> evidence -->
+  <path class="line" d="M146 196 H366"/>
+  <path class="line" d="M256 196 V250"/>
+
+  <!-- human approval: check -->
+  <rect class="blue" x="86" y="136" width="120" height="120" rx="24"/>
+  <path class="glyph" d="M118 198 l22 22 l36 -44"/>
+
+  <!-- blocked: cross -->
+  <rect class="red" x="216" y="226" width="80" height="80" rx="18"/>
+  <path class="glyph" d="M240 250 l32 32 M272 250 l-32 32" style="stroke-width:12"/>
+
+  <!-- verified evidence: seal -->
+  <rect class="purple" x="306" y="136" width="120" height="120" rx="24"/>
+  <circle cx="366" cy="196" r="30" class="glyph"/>
+  <path class="glyph" d="M352 196 l10 10 l18 -20" style="stroke-width:10"/>
+
+  <text class="word" x="256" y="392" text-anchor="middle">Virtual Haibin</text>
+  <text class="sub" x="256" y="434" text-anchor="middle">BY CANFIXIT</text>
+</svg>
