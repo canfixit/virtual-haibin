@@ -46,31 +46,43 @@ jobs:
           fi
 
       - name: Build and start the stack against the sandbox
-        run: docker compose up -d --build --wait
+        id: stack
+        run: |
+          if ! docker compose up -d --build --wait; then
+            echo "::error title=Stack startup failure::docker compose up --wait did not bring every service up healthy (see container logs below). The sandbox scenarios were not run, so they report nothing about product behavior."
+            exit 1
+          fi
 
       - name: Smoke test service health
+        id: health
         run: |
           curl --fail --silent --show-error http://localhost:5173/ > /dev/null
           curl --fail --silent --show-error http://localhost:4000/health > /dev/null
           curl --fail --silent --show-error http://localhost:4001/health > /dev/null
           curl --fail --silent --show-error http://localhost:4002/health > /dev/null
           curl --fail --silent --show-error http://127.0.0.1:4003/health > /dev/null
+          curl --fail --silent --show-error http://localhost:4004/health > /dev/null
 
+      # The scenarios below run only on a healthy stack: against a stack that
+      # never started their failures would be misleading noise. Once it is
+      # healthy each runs independently, so one scenario failing does not
+      # hide the others' results.
       - name: Sandbox integration scenarios (approval, ALLOW, semantic denials, replay, conflict, reconciliation)
+        if: ${{ !cancelled() && steps.health.outcome == 'success' }}
         run: |
           APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
           scripts/ci-external-step.sh "sandbox-integration" \
             docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/sandbox-integration.mjs
 
       - name: Phase 4.5 semantic demo (same payment terms, different operation)
-        if: success() || failure()
+        if: ${{ !cancelled() && steps.health.outcome == 'success' }}
         run: |
           APPROVER_CODE="$(docker compose exec -T approver cat /keys/approval-code)"
           scripts/ci-external-step.sh "semantic-demo" \
             docker compose run --rm -T -e APPROVER_CODE="$APPROVER_CODE" demo-driver node scripts/semantic-demo.mjs
 
       - name: Phase 5 portable evidence (export, stop authority, offline + online verify, tampering, restart)
-        if: success() || failure()
+        if: ${{ !cancelled() && steps.health.outcome == 'success' }}
         run: scripts/ci-external-step.sh "evidence-demo" ./scripts/evidence-demo.sh
 
       - name: Show container logs on failure

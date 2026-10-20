@@ -68,7 +68,7 @@ The browser must not hold the authority's bearer secret, so the agent relays the
 `verifier-api` is the same library as the CLI (`packages/evidence`) behind a small HTTP front. It is constrained in four ways:
 
 - It holds no keys and has no database.
-- It mounts the repository, its dependencies and the three *public* trust files read-only.
+- It runs the code and dependencies built into the image on a read-only root filesystem, and mounts only the three *public* trust files (read-only).
 - It sits on its own `verification` network, so it cannot resolve or reach the authority, agent, approver or service (tested).
 - Its online mode queries only its own configured sandbox RPC.
 

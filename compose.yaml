@@ -292,12 +292,20 @@ services:
 
   # The standalone verifier library behind a small HTTP front, so the demo UI
   # shows REAL verifier output. Own network: it cannot resolve or reach the
-  # authority, agent, approver or service; read-only repo, deps and PUBLIC
-  # trust files only; online mode reaches just the sandbox RPC.
+  # authority, agent, approver or service; PUBLIC trust files only; online
+  # mode reaches just the sandbox RPC.
+  # Runs the source and dependencies baked into the image (rebuild to pick up
+  # changes) rather than bind-mounting the repo: nesting node_modules volumes
+  # under a read-only bind fails on a fresh checkout, where the mountpoints do
+  # not exist yet and cannot be created. read_only keeps the code immutable.
   verifier-api:
     image: virtual-haibin-dev:local
     working_dir: /workspace
     command: ["node", "--import", "tsx", "apps/verifier/src/serve.ts"]
+    read_only: true
+    # tsx's transform cache (os.tmpdir()); nothing persistent.
+    tmpfs:
+      - /tmp
     environment:
       VERIFIER_PORT: "4004"
       VERIFIER_ISSUER_TRUST_FILE: "/trust/issuer/trusted-issuer"
@@ -310,13 +318,6 @@ services:
     networks:
       - verification
     volumes:
-      - .:/workspace:ro
-      - root_node_modules:/workspace/node_modules:ro
-      - verifier_node_modules:/workspace/apps/verifier/node_modules:ro
-      - evidence_node_modules:/workspace/packages/evidence/node_modules:ro
-      - mandate_node_modules:/workspace/packages/mandate/node_modules:ro
-      - payments_node_modules:/workspace/packages/payments/node_modules:ro
-      - policy_node_modules:/workspace/packages/policy/node_modules:ro
       - issuer_trust:/trust/issuer:ro
       - authority_trust:/trust/authority:ro
       - service_trust:/trust/service:ro

@@ -64,7 +64,7 @@ Services:
 - authority (protected signer): http://localhost:4002
 - mock service agent: http://localhost:4001
 - approver (human-approval boundary): http://127.0.0.1:4003 (host loopback only, on its own `approval` network)
-- verifier-api (standalone evidence verifier for the UI): http://localhost:4004 (own `verification` network; cannot reach Virtual Haibin services)
+- verifier-api (standalone evidence verifier for the UI): http://localhost:4004 (own `verification` network; cannot reach Virtual Haibin services). It runs the code baked into the image, not the live working tree, so rebuild (`docker compose up --build`) after changing verifier or evidence code.
 
 The agent talks to the service agent and authority over Docker's internal network using:
 

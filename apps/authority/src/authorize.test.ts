@@ -420,24 +420,136 @@ test("a conflicting request for a denied invocation is also refused rather than 
   assert.equal(provider.calls.length, 0);
 });
 
-test("concurrent requests with one invocationId but different payloads pay at most once", async () => {
-  // The merchant's real price is 10000; the 15000 request is the conflicting one.
-  const provider = new CountingPaymentProvider({ terms: { amountAtomic: "10000" } });
-  const service = createService(provider);
+/** Holds every challenge fetch until released, so a test can keep one invocation in flight. */
+class GatedPaymentProvider extends CountingPaymentProvider {
+  readonly entered: Promise<void>;
+  #signalEntered!: () => void;
+  #release!: () => void;
+  readonly #gate = new Promise<void>((resolve) => (this.#release = resolve));
+
+  constructor(...args: ConstructorParameters<typeof CountingPaymentProvider>) {
+    super(...args);
+    this.entered = new Promise<void>((resolve) => (this.#signalEntered = resolve));
+  }
+
+  release(): void {
+    this.#release();
+  }
+
+  override async fetchChallenge(...args: Parameters<CountingPaymentProvider["fetchChallenge"]>) {
+    this.#signalEntered();
+    await this.#gate;
+    return super.fetchChallenge(...args);
+  }
+}
+
+// The merchant's real price is 10000. Whichever of these two requests first
+// claims the invocation establishes its decision: the 10000 one is ALLOWed
+// and paid; the 15000 one is DENYed because the real challenge does not ask
+// for what the agent signed. Either way the other request is a conflict.
+const RACE_PRICE_ATOMIC = "10000";
+const RACE_CONFLICT_ATOMIC = "15000";
+
+async function assertSingleDecision(
+  { service, store, provider }: { service: AuthorityService; store: SqliteAuthorityStore; provider: CountingPaymentProvider },
+  permit: Awaited<ReturnType<typeof buildSignedPermit>>,
+  invocationId: string,
+  winner: { receipt: SignedAuthorizationReceipt },
+): Promise<void> {
+  const { receipt } = winner;
+  const won = receipt.amountAtomic === RACE_PRICE_ATOMIC ? "ALLOW" : "DENY";
+  assert.equal(receipt.decision, won);
+
+  if (won === "ALLOW") {
+    assert.equal(provider.calls.length, 1);
+    assert.equal(provider.calls[0]?.reference, invocationId);
+    assert.equal(receipt.paymentTransactionId, "mock-tx-1");
+  } else {
+    assert.ok(receipt.reasonCodes.includes("CHALLENGE_REQUEST_MISMATCH"), receipt.reasonCodes.join(","));
+    assert.equal(provider.calls.length, 0);
+    assert.equal(receipt.paymentTransactionId, null);
+  }
+
+  // Only the winner ever reached the merchant.
+  assert.equal(provider.challengesFetched.length, 1);
+
+  // Durable state records exactly the winner's request, settled, with no
+  // reservation left behind.
+  const stored = await store.getInvocation(invocationId);
+  assert.equal(stored?.fingerprint, receipt.requestFingerprint);
+  assert.equal(stored?.amountAtomic, receipt.amountAtomic);
+  assert.equal(stored?.state, won === "ALLOW" ? "CONFIRMED" : "DENIED");
+  const budget = await service.getGrantBudget(permit.issuer, permit.grantId);
+  assert.equal(budget?.reservedAtomic ?? "0", "0");
+  assert.equal(budget?.consumedAtomic ?? "0", won === "ALLOW" ? RACE_PRICE_ATOMIC : "0");
+
+  // After settlement the loser is still refused (now from durable state) and
+  // the winner replays its own receipt; neither pays or fetches again.
+  const loserAmount = receipt.amountAtomic === RACE_PRICE_ATOMIC ? RACE_CONFLICT_ATOMIC : RACE_PRICE_ATOMIC;
+  await assert.rejects(service.authorize(await signedInput(permit, { invocationId, amountAtomic: loserAmount })), InvocationConflictError);
+  const replay = await service.authorize(await signedInput(permit, { invocationId, amountAtomic: receipt.amountAtomic }));
+  assert.equal(replay.replay, true);
+  assert.deepEqual(replay.receipt, receipt);
+  assert.equal(provider.calls.length, won === "ALLOW" ? 1 : 0);
+  assert.equal(provider.challengesFetched.length, 1);
+}
+
+for (const [firstAmount, secondAmount] of [
+  [RACE_PRICE_ATOMIC, RACE_CONFLICT_ATOMIC],
+  [RACE_CONFLICT_ATOMIC, RACE_PRICE_ATOMIC],
+] as const) {
+  test(`overlapping requests with one invocationId: ${firstAmount} first establishes the decision, ${secondAmount} conflicts`, async () => {
+    const provider = new GatedPaymentProvider({ terms: { amountAtomic: RACE_PRICE_ATOMIC } });
+    const store = new SqliteAuthorityStore(":memory:");
+    const service = createService(provider, [], { store });
+    const permit = await buildSignedPermit();
+    const invocationId = `inv-race-ordered-${firstAmount}`;
+    const [first, second] = await Promise.all([
+      signedInput(permit, { invocationId, amountAtomic: firstAmount }),
+      signedInput(permit, { invocationId, amountAtomic: secondAmount }),
+    ]);
+
+    // The first request is held mid-flight (after claiming the invocation,
+    // before any decision is stored) while the conflicting one arrives.
+    const firstResult = service.authorize(first);
+    await provider.entered;
+    await assert.rejects(service.authorize(second), (error: unknown) => {
+      assert.ok(error instanceof InvocationConflictError);
+      assert.equal(error.reasonCode, "INVOCATION_CONFLICT");
+      return true;
+    });
+    assert.equal(provider.calls.length, 0);
+
+    provider.release();
+    const winner = await firstResult;
+    assert.equal(winner.replay, false);
+    assert.equal(winner.receipt.amountAtomic, firstAmount);
+    await assertSingleDecision({ service, store, provider }, permit, invocationId, winner);
+  });
+}
+
+test("concurrent requests with one invocationId but different payloads: exactly one decides, the other conflicts", async () => {
+  // Real scheduling: either request may claim the invocation first (both
+  // orderings are pinned down by the controlled tests above).
+  const provider = new CountingPaymentProvider({ terms: { amountAtomic: RACE_PRICE_ATOMIC } });
+  const store = new SqliteAuthorityStore(":memory:");
+  const service = createService(provider, [], { store });
   const permit = await buildSignedPermit();
   const inputs = await Promise.all([
-    signedInput(permit, { invocationId: "inv-race-1", amountAtomic: "10000" }),
-    signedInput(permit, { invocationId: "inv-race-1", amountAtomic: "15000" }),
+    signedInput(permit, { invocationId: "inv-race-1", amountAtomic: RACE_PRICE_ATOMIC }),
+    signedInput(permit, { invocationId: "inv-race-1", amountAtomic: RACE_CONFLICT_ATOMIC }),
   ]);
 
   const results = await Promise.allSettled(inputs.map((input) => service.authorize(input)));
 
   const fulfilled = results.filter((result) => result.status === "fulfilled");
+  const rejected = results.filter((result) => result.status === "rejected");
   assert.equal(fulfilled.length, 1);
-  assert.equal(fulfilled[0]?.status === "fulfilled" && fulfilled[0].value.receipt.decision, "ALLOW");
-  const rejected = results.find((result) => result.status === "rejected");
-  assert.ok(rejected && rejected.reason instanceof InvocationConflictError);
-  assert.equal(provider.calls.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.ok(rejected[0]?.reason instanceof InvocationConflictError, String(rejected[0]?.reason));
+  const winner = fulfilled[0]!.value;
+  assert.equal(winner.replay, false);
+  await assertSingleDecision({ service, store, provider }, permit, "inv-race-1", winner);
 });
 
 test("the same invocationId under a different permit is a conflict", async () => {

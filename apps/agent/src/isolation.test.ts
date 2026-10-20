@@ -101,13 +101,19 @@ test("compose: the service signing key is service-only; others see only its publ
   assert.doesNotMatch(verifierTemplate, /service_keys/);
 });
 
-test("compose: the UI-facing verifier holds no private keys, mounts read-only, and is isolated from Virtual Haibin", () => {
+test("compose: the UI-facing verifier holds no private keys, runs read-only, and is isolated from Virtual Haibin", () => {
   const verifierApi = composeService("verifier-api");
   assert.doesNotMatch(verifierApi, /approver_keys|authority_data|service_keys/);
-  assert.match(verifierApi, /- \.:\/workspace:ro/);
-  for (const trust of ["issuer_trust:/trust/issuer:ro", "authority_trust:/trust/authority:ro", "service_trust:/trust/service:ro"]) {
-    assert.ok(verifierApi.includes(trust), trust);
-  }
+  // Image-baked code on a read-only root filesystem; the only mounts are the
+  // three public trust files, read-only (no repo or dependency volumes).
+  assert.match(verifierApi, /\n {4}read_only: true\n/);
+  const trustMounts = ["issuer_trust:/trust/issuer:ro", "authority_trust:/trust/authority:ro", "service_trust:/trust/service:ro"];
+  const volumes = verifierApi.match(/\n {4}volumes:\n((?: {6}- .*\n)+)/);
+  assert.ok(volumes, "verifier-api volumes not found");
+  assert.deepEqual(
+    volumes[1]!.trim().split("\n").map((line) => line.trim().replace(/^- /, "")),
+    trustMounts,
+  );
   // Its own network only: it cannot resolve the authority, agent, approver or service.
   assert.match(verifierApi, /networks:\n\s+- verification\n/);
   assert.doesNotMatch(verifierApi, /- default|- approval/);
