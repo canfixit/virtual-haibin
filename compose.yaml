@@ -24,19 +24,22 @@ x-demo-payment-config: &demo-payment-config
 # it; the agent and web never see or choose an RPC.
 x-sandbox-rpc: &sandbox-rpc "https://402.surfnet.dev:8899"
 
+# Verifier CLI tools: the code and dependencies baked into the image on a
+# read-only root filesystem (rebuild to pick up verifier changes), so they run
+# on a fresh checkout before anything else has started. Only bundles under
+# .evidence/ and the PUBLIC trust volumes are visible, all read-only. Trust
+# root files may also be placed under .evidence/ and named on the command line.
 x-verifier: &verifier
   image: virtual-haibin-dev:local
   working_dir: /workspace
   profiles: ["tools"]
   entrypoint: ["node", "--import", "tsx", "apps/verifier/src/main.ts"]
+  read_only: true
+  # tsx's transform cache (os.tmpdir()); nothing persistent.
+  tmpfs:
+    - /tmp
   volumes:
-    - .:/workspace:ro
-    - root_node_modules:/workspace/node_modules:ro
-    - verifier_node_modules:/workspace/apps/verifier/node_modules:ro
-    - evidence_node_modules:/workspace/packages/evidence/node_modules:ro
-    - mandate_node_modules:/workspace/packages/mandate/node_modules:ro
-    - payments_node_modules:/workspace/packages/payments/node_modules:ro
-    - policy_node_modules:/workspace/packages/policy/node_modules:ro
+    - ./.evidence:/workspace/.evidence:ro
     - issuer_trust:/trust/issuer:ro
     - authority_trust:/trust/authority:ro
     - service_trust:/trust/service:ro
@@ -58,6 +61,20 @@ x-dev-volumes: &dev-volumes
   - evidence_node_modules:/workspace/packages/evidence/node_modules
 
 services:
+  # One-shot dependency bootstrap: the ONLY container that installs into the
+  # shared node_modules volumes, and the first to mount them (Docker fills an
+  # empty named volume from the image only for the first container that
+  # mounts it; concurrent first mounts see it empty). So the volumes start as
+  # the image's install, and --offline against the image's store
+  # (pnpm_config_store_dir) only verifies it; a lockfile newer than the image
+  # fails here, loudly: rebuild. Every dev service waits for it to succeed,
+  # and pnpm in the services fails fast instead of installing
+  # (pnpm_config_verify_deps_before_run=error, Dockerfile.dev).
+  deps:
+    <<: *app-image
+    command: ["pnpm", "install", "--frozen-lockfile", "--offline"]
+    volumes: *dev-volumes
+
   # Human-approval boundary: the ONLY holder of the PurchasePermit issuer
   # private key. The key and the human's approval code live in
   # approver_keys, mounted by no other service; only the issuer PUBLIC key is
@@ -87,6 +104,9 @@ services:
       - identity_node_modules:/workspace/packages/identity/node_modules
       - approver_keys:/keys
       - issuer_trust:/trust
+    depends_on:
+      deps:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -138,6 +158,9 @@ services:
       - service_keys:/keys
       - service_trust:/service-trust
       - authority_trust:/trust/authority:ro
+    depends_on:
+      deps:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -201,6 +224,8 @@ services:
       - authority_trust:/authority-trust
       - service_trust:/service-trust:ro
     depends_on:
+      deps:
+        condition: service_completed_successfully
       approver:
         condition: service_healthy
       # Pins the service's key, which the service publishes on start.
@@ -235,6 +260,8 @@ services:
       - "4000:4000"
     volumes: *dev-volumes
     depends_on:
+      deps:
+        condition: service_completed_successfully
       service-agent:
         condition: service_healthy
       authority:
@@ -275,9 +302,8 @@ services:
     volumes:
       - .:/workspace
 
-  # Standalone evidence verifier (tools profile). NO network at all, the
-  # repository and dependencies read-only, and trust roots mounted read-only
-  # from the published PUBLIC keys. It never talks to the authority.
+  # Standalone evidence verifier (tools profile). NO network at all; see
+  # x-verifier for what it can read. It never talks to the authority.
   #   docker compose run --rm verifier verify .evidence/<id>.json \
   #     --issuer-trust /trust/issuer/trusted-issuer --authority-trust /trust/authority/authority.pub
   verifier:
@@ -286,9 +312,12 @@ services:
 
   # Same verifier with network access, for --online settlement observation
   # on the sandbox RPC named on its own command line (default: the Pay.sh
-  # sandbox). Still never contacts the authority.
+  # sandbox). On the isolated verification network: internet egress for the
+  # RPC, but it cannot resolve or reach any Virtual Haibin service.
   verifier-online:
     <<: *verifier
+    networks:
+      - verification
 
   # The standalone verifier library behind a small HTTP front, so the demo UI
   # shows REAL verifier output. Own network: it cannot resolve or reach the
@@ -345,8 +374,23 @@ services:
       - "5173:5173"
     volumes: *dev-volumes
     depends_on:
+      deps:
+        condition: service_completed_successfully
       agent:
         condition: service_healthy
+    # Lets `up --wait` (and CI smoke tests) wait until Vite actually serves.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:5173/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
 volumes:
   root_node_modules:
@@ -376,5 +420,5 @@ networks:
   default:
   # The approver alone. Nothing else joins it except the demo-driver tool.
   approval:
-  # The UI-facing verifier alone (internet egress for --online RPC only).
+  # The UI-facing verifier and verifier-online (internet egress for --online RPC only).
   verification:

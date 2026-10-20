@@ -23,6 +23,16 @@ COPY packages/evidence/package.json packages/evidence/package.json
 
 RUN pnpm install --frozen-lockfile
 
+# Containers never install on their own: `pnpm run` fails fast if dependencies
+# are stale instead of auto-installing, which would race other containers
+# sharing the node_modules volumes. Only the compose `deps` bootstrap (and an
+# explicit `pnpm install`) installs.
+ENV pnpm_config_verify_deps_before_run=error
+# Keep using the store filled by the install above. node_modules volumes sit on
+# a different filesystem, where pnpm would otherwise start an empty store and
+# download everything again.
+ENV pnpm_config_store_dir=/pnpm/store
+
 COPY . .
 
 CMD ["pnpm", "dev"]

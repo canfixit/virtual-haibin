@@ -172,5 +172,8 @@ ledger/
 *.sqlite
 *.sqlite3
 
-# Exported evidence bundles from local demo runs (public data, but generated)
-.evidence/
+# Exported evidence bundles from local demo runs (public data, but generated).
+# The directory itself is kept so the verifier tools can bind-mount it on a
+# fresh checkout without Docker creating it root-owned.
+.evidence/*
+!.evidence/README.md

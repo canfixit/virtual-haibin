@@ -34,7 +34,7 @@ docker compose run --rm verifier-online verify .evidence/<id>.json \
   --issuer-trust /trust/issuer/trusted-issuer --authority-trust /trust/authority/authority.pub --online
 ```
 
-The `verifier` container runs with `network_mode: none`, mounts the repository and dependencies **read-only**, and mounts only the two *public* trust files. It has no authority, database, agent, approver, service, payment key or issuer key. The CLI exits 0 for VALID, 1 for INVALID, 2 for INDETERMINATE and 64 for usage errors.
+The `verifier` container runs with `network_mode: none`. It runs the code built into the image on a **read-only** root filesystem, and mounts only `.evidence/` and the *public* trust files, read-only. It needs a built image but not a running stack: before the stack has published its keys, put the trust-root files under `.evidence/` and name them on the command line. It has no authority, database, agent, approver, service, payment key or issuer key. The CLI exits 0 for VALID, 1 for INVALID, 2 for INDETERMINATE and 64 for usage errors.
 
 ## Trust roots (from verifier configuration, never from the bundle)
 

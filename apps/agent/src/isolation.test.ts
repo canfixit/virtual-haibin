@@ -80,7 +80,6 @@ test("compose: the authority receipt key volume is authority-only; verifiers get
   const verifierTemplate = compose.slice(compose.indexOf("x-verifier:"), compose.indexOf("x-dev-volumes:"));
   assert.match(verifierTemplate, /authority_trust:\/trust\/authority:ro/);
   assert.match(verifierTemplate, /issuer_trust:\/trust\/issuer:ro/);
-  assert.match(verifierTemplate, /- \.:\/workspace:ro/);
   assert.doesNotMatch(verifierTemplate, /authority_data|approver_keys/);
   assert.match(composeService("verifier"), /network_mode: none/);
 });
@@ -117,4 +116,38 @@ test("compose: the UI-facing verifier holds no private keys, runs read-only, and
   // Its own network only: it cannot resolve the authority, agent, approver or service.
   assert.match(verifierApi, /networks:\n\s+- verification\n/);
   assert.doesNotMatch(verifierApi, /- default|- approval/);
+});
+
+test("compose: the verifier CLI tools run image code read-only and see only evidence and public trust roots", () => {
+  const compose = readFileSync(join(repoRoot, "compose.yaml"), "utf8");
+  const verifierTemplate = compose.slice(compose.indexOf("x-verifier:"), compose.indexOf("x-dev-volumes:"));
+  assert.match(verifierTemplate, /\n {2}read_only: true\n/);
+  const volumes = verifierTemplate.match(/\n {2}volumes:\n((?: {4}- .*\n)+)/);
+  assert.ok(volumes, "x-verifier volumes not found");
+  assert.deepEqual(
+    volumes[1]!.trim().split("\n").map((line) => line.trim().replace(/^- /, "")),
+    ["./.evidence:/workspace/.evidence:ro", "issuer_trust:/trust/issuer:ro", "authority_trust:/trust/authority:ro", "service_trust:/trust/service:ro"],
+  );
+
+  // Offline: no network at all. Online: only the isolated verification network.
+  const offline = composeService("verifier");
+  assert.match(offline, /network_mode: none/);
+  assert.doesNotMatch(offline, /networks:/);
+  const online = composeService("verifier-online");
+  assert.match(online, /networks:\n\s+- verification\n/);
+  assert.doesNotMatch(online, /- default|- approval|network_mode/);
+});
+
+test("compose: only the deps bootstrap installs, and every dev service waits for it", () => {
+  assert.match(composeService("deps"), /command: \["pnpm", "install", "--frozen-lockfile", "--offline"\]/);
+  assert.doesNotMatch(composeService("deps"), /approver_keys|authority_data|service_keys|\/keys|\/trust/);
+  for (const service of ["approver", "service-agent", "authority", "agent", "web"]) {
+    assert.match(
+      composeService(service),
+      /depends_on:\n(?: {6}.*\n)*? {6}deps:\n {8}condition: service_completed_successfully\n/,
+      `${service} must wait for the deps bootstrap`,
+    );
+  }
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile.dev"), "utf8");
+  assert.match(dockerfile, /^ENV pnpm_config_verify_deps_before_run=error$/m);
 });

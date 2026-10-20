@@ -16,6 +16,8 @@ All dependency directories are mounted as Docker-managed named volumes:
 
 This prevents pnpm dependencies and native build artifacts from being written into the WSL project tree.
 
+Dependencies are initialised once, in order. The one-shot `deps` service is the only container that installs into these volumes. It is the first container to mount the volumes, so Docker fills them from the image's own install. It then runs `pnpm install --frozen-lockfile --offline` against the image's pnpm store, which only checks that install, without touching the network. If the lockfile is newer than the image, it fails and tells you to rebuild. Every dev service waits for it to exit successfully (`service_completed_successfully`). Inside the containers, `pnpm run` never installs on its own (`pnpm_config_verify_deps_before_run=error`). If dependencies are stale, a service fails with a pnpm error instead of racing other containers to install. After changing dependencies, rebuild the image (`docker compose up --build`).
+
 ## Clone without installing Git in WSL
 
 Because the repository is public, use a temporary Git container:
@@ -138,8 +140,8 @@ The next `up --build` recreates them from the development image.
 
 Evidence verification uses two tools-profile services. Bundles are exported to the gitignored `.evidence/` directory:
 
-- `verifier` runs with `network_mode: none`, read-only repository and dependencies, and read-only public trust files at `/trust/issuer/trusted-issuer` and `/trust/authority/authority.pub`.
-- `verifier-online` is the same, plus network access for `--online` sandbox settlement checks.
+- `verifier` runs with `network_mode: none`. It runs the code and dependencies built into the image on a read-only root filesystem, and sees only `.evidence/` and the public trust files at `/trust/issuer/trusted-issuer`, `/trust/authority/authority.pub` and `/trust/service/service.pub`, all read-only. It needs only a built image, not a running stack. Bundles to verify must be under `.evidence/`; trust-root files can be placed there too (see `.evidence/README.md`). Rebuild the image after changing verifier code.
+- `verifier-online` is the same, but on the isolated `verification` network for `--online` sandbox settlement checks. It cannot reach any Virtual Haibin service.
 
 ```bash
 ./scripts/evidence-demo.sh
